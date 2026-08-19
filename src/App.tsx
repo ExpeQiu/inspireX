@@ -7,12 +7,29 @@ import {
   type DragEvent as ReactDragEvent,
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import { convertFileSrc, hasTauriIpc, invoke } from "./bridge";
-import { pickDirectory, pickFiles, splitPathList } from "./desktop";
+import { pickFiles, splitPathList } from "./desktop";
+import { FolderPicker, type FolderPickerKind } from "./FolderPicker";
+import {
+  defaultBrowsePath,
+  folderPath,
+  parseAppUrl,
+  PATHS,
+  sameRoute,
+  toHref,
+  type BrowseKind,
+  type Mode,
+} from "./routes";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import "./App.css";
+
+type FolderPickerState = {
+  purpose: "index" | "hub";
+  kind: FolderPickerKind;
+};
 
 type Asset = {
   id: string;
@@ -91,6 +108,11 @@ type GenJob = {
   outputPaths?: string[];
 };
 
+type PickedGen = {
+  path: string;
+  jobId: string;
+};
+
 type ExternalKind = "folder" | "image" | "video";
 
 type ExternalItem = {
@@ -130,8 +152,6 @@ type FinderTagValue = {
 };
 
 type PinnedFolder = { name: string; path: string };
-type Mode = "browse" | "library" | "subscribe" | "generate";
-type BrowseKind = "volumes" | "local" | "hub";
 
 type HubSuggestion = { name: string; path: string };
 type HubStatus = {
@@ -175,6 +195,12 @@ function virtualRootOf(kind: BrowseKind): string {
 function isKindVirtualPath(path: string | null | undefined, virtual: string): boolean {
   if (!path) return true;
   return path === virtual;
+}
+
+function spaNav(e: MouseEvent<HTMLAnchorElement>, apply: () => void) {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+  e.preventDefault();
+  apply();
 }
 
 function boundRootOf(
@@ -399,6 +425,71 @@ function fileBaseName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+const aspectCache = new Map<string, string>();
+
+function ratioFromSize(w?: number | null, h?: number | null): string | undefined {
+  if (!w || !h || w <= 0 || h <= 0) return undefined;
+  return `${w} / ${h}`;
+}
+
+function RatioThumb({
+  src,
+  alt,
+  cacheKey,
+  width,
+  height,
+  background,
+}: {
+  src?: string | null;
+  alt: string;
+  cacheKey: string;
+  width?: number | null;
+  height?: number | null;
+  background?: string;
+}) {
+  const known = ratioFromSize(width, height);
+  const [ratio, setRatio] = useState(
+    () => known ?? aspectCache.get(cacheKey) ?? "3 / 4",
+  );
+  const [ready, setReady] = useState(() => Boolean(known || aspectCache.get(cacheKey)));
+
+  useEffect(() => {
+    if (!known) return;
+    aspectCache.set(cacheKey, known);
+    setRatio(known);
+    setReady(true);
+  }, [cacheKey, known]);
+
+  return (
+    <div
+      className={`thumb${ready ? " thumb-ready" : ""}`}
+      style={{
+        background: background || "var(--surface-2)",
+        aspectRatio: ready ? ratio : undefined,
+      }}
+    >
+      {src ? (
+        <img
+          src={src}
+          alt={alt}
+          loading="lazy"
+          onLoad={(e) => {
+            const r = ratioFromSize(
+              e.currentTarget.naturalWidth,
+              e.currentTarget.naturalHeight,
+            );
+            if (r) {
+              aspectCache.set(cacheKey, r);
+              setRatio(r);
+            }
+            setReady(true);
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 function ExternalThumb({
   item,
   large = false,
@@ -410,6 +501,27 @@ function ExternalThumb({
   const [visible, setVisible] = useState(large);
   const [src, setSrc] = useState<string | null>(null);
   const [err, setErr] = useState(false);
+  const [ratio, setRatio] = useState(
+    () =>
+      aspectCache.get(item.path) ??
+      (item.kind === "video" ? "16 / 9" : "3 / 4"),
+  );
+  const [ready, setReady] = useState(() => aspectCache.has(item.path));
+
+  const rememberRatio = useCallback((w: number, h: number) => {
+    const r = ratioFromSize(w, h);
+    if (r) {
+      aspectCache.set(item.path, r);
+      setRatio(r);
+    }
+    setReady(true);
+  }, [item.path]);
+
+  useEffect(() => {
+    const cached = aspectCache.get(item.path);
+    setRatio(cached ?? (item.kind === "video" ? "16 / 9" : "3 / 4"));
+    setReady(Boolean(cached));
+  }, [item.path, item.kind]);
 
   useEffect(() => {
     if (large || visible) return;
@@ -458,54 +570,74 @@ function ExternalThumb({
     };
   }, [item.path, item.kind, large, visible]);
 
+  let body: ReactNode;
   if (err) {
-    return (
-      <div ref={rootRef} className="thumb-fallback">
-        无法预览
-      </div>
-    );
-  }
-  if (!visible || !src) {
-    return (
-      <div ref={rootRef} className="thumb-fallback">
-        {visible ? "加载中…" : ""}
-      </div>
-    );
-  }
-  if (item.kind === "video") {
-    return (
-      <div ref={rootRef} className="thumb-inner">
+    body = <div className="thumb-fallback">无法预览</div>;
+  } else if (!visible || !src) {
+    body = <div className="thumb-fallback">{visible ? "加载中…" : ""}</div>;
+  } else if (item.kind === "video") {
+    body = (
+      <div className="thumb-inner">
         <video
           src={src}
           muted
           controls={large}
           preload={large ? "metadata" : "none"}
           className="video-thumb"
+          onLoadedMetadata={(e) =>
+            rememberRatio(e.currentTarget.videoWidth, e.currentTarget.videoHeight)
+          }
+          onError={() => setErr(true)}
+        />
+      </div>
+    );
+  } else {
+    body = (
+      <div className="thumb-inner">
+        <img
+          src={src}
+          alt={item.name}
+          loading="lazy"
+          decoding="async"
+          onLoad={(e) =>
+            rememberRatio(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)
+          }
           onError={() => setErr(true)}
         />
       </div>
     );
   }
+
+  if (large) {
+    return <div ref={rootRef}>{body}</div>;
+  }
   return (
-    <div ref={rootRef} className="thumb-inner">
-      <img src={src} alt={item.name} loading="lazy" decoding="async" onError={() => setErr(true)} />
+    <div
+      ref={rootRef}
+      className={`thumb${ready ? " thumb-ready" : ""}`}
+      style={ready ? { aspectRatio: ratio } : undefined}
+    >
+      {body}
     </div>
   );
 }
 
 export default function App() {
-  const [mode, setMode] = useState<Mode>("browse");
+  const bootRef = useRef(parseAppUrl(window.location.pathname, window.location.search));
+  const boot = bootRef.current;
+  const skipUrlSync = useRef(false);
+  const [mode, setMode] = useState<Mode>(boot.mode);
   const [info, setInfo] = useState<LibraryInfo | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   const [folderId, setFolderId] = useState<string | null>(null);
-  const [viewFolderId, setViewFolderId] = useState<string | null>(null);
+  const [viewFolderId, setViewFolderId] = useState<string | null>(boot.viewFolderId);
   const [folderAssets, setFolderAssets] = useState<Asset[]>([]);
   const [folderMedia, setFolderMedia] = useState<ExternalItem[]>([]);
   const [libSelected, setLibSelected] = useState<Set<string>>(() => new Set());
-  const [tagFilter, setTagFilter] = useState<string | null>(null);
-  const [colorFilter, setColorFilter] = useState<string | null>(null);
+  const [tagFilter, setTagFilter] = useState<string | null>(boot.tagFilter);
+  const [colorFilter, setColorFilter] = useState<string | null>(boot.colorFilter);
   const [query, setQuery] = useState("");
   const [useClip, setUseClip] = useState(true);
   const [status, setStatus] = useState("");
@@ -528,24 +660,27 @@ export default function App() {
   const [genN, setGenN] = useState(1);
   const [genSize, setGenSize] = useState("1024x1024");
   const [genFilterId, setGenFilterId] = useState<string | null>(null);
+  const [pickedGen, setPickedGen] = useState<PickedGen | null>(null);
 
-  const [browseKind, setBrowseKind] = useState<BrowseKind>("volumes");
+  const [browseKind, setBrowseKind] = useState<BrowseKind>(boot.browseKind);
   const [volumesRoot, setVolumesRoot] = useState(VOLUMES_VIRTUAL);
   const [volumeRoots, setVolumeRoots] = useState<PinnedFolder[]>([]);
   const [localRoot, setLocalRoot] = useState(LOCAL_VIRTUAL);
   const [localRoots, setLocalRoots] = useState<PinnedFolder[]>([]);
   const [hubRoot, setHubRoot] = useState("");
   const [hubSuggestions, setHubSuggestions] = useState<HubSuggestion[]>([]);
-  const [browsePath, setBrowsePath] = useState<string | null>(null);
+  const [browsePath, setBrowsePath] = useState<string | null>(boot.browsePath);
   const [listing, setListing] = useState<ExternalListing | null>(null);
   const [browseError, setBrowseError] = useState<string | null>(null);
   const [picked, setPicked] = useState<ExternalItem | null>(null);
-  const [, setPickedTags] = useState<FinderTagValue[]>([]);
+  const [pickedTags, setPickedTags] = useState<FinderTagValue[]>([]);
+  const [pickedTagDraft, setPickedTagDraft] = useState("");
   const [customFinderTags, setCustomFinderTags] = useState<FinderTag[]>(() => loadFinderCustom());
   const [hiddenFinderTags, setHiddenFinderTags] = useState<Set<string>>(() => loadFinderHidden());
   const [pinnedFolders, setPinnedFolders] = useState<PinnedFolder[]>(() => loadPinnedFolders());
-  const [pathAsk, setPathAsk] = useState<null | "folder" | "files" | "hub" | "hub-files">(null);
+  const [pathAsk, setPathAsk] = useState<null | "files" | "hub-files">(null);
   const [pathDraft, setPathDraft] = useState("");
+  const [folderPicker, setFolderPicker] = useState<FolderPickerState | null>(null);
   const [sidebarHidden, setSidebarHidden] = useState<Set<string>>(() => loadSidebarHidden());
   const listingRef = useRef<ExternalListing | null>(null);
   listingRef.current = listing;
@@ -560,6 +695,65 @@ export default function App() {
   const sourceLabel = sourceLabelOf(browseKind);
   const hubBound = Boolean(hubRoot);
   const detailOpen = Boolean(picked || selected);
+  const routeHref = toHref({
+    mode,
+    browseKind,
+    viewFolderId,
+    browsePath,
+    tagFilter,
+    colorFilter,
+  });
+
+  useEffect(() => {
+    if (skipUrlSync.current) {
+      skipUrlSync.current = false;
+      return;
+    }
+    const cur = `${window.location.pathname}${window.location.search}`;
+    if (cur === routeHref) return;
+    const curRoute = parseAppUrl(window.location.pathname, window.location.search);
+    const nextRoute = parseAppUrl(
+      routeHref.split("?")[0],
+      routeHref.includes("?") ? routeHref.slice(routeHref.indexOf("?")) : "",
+    );
+    if (sameRoute(curRoute, nextRoute)) {
+      history.replaceState(null, "", routeHref);
+    } else {
+      history.pushState(null, "", routeHref);
+    }
+    console.info("[inspirex]", { event: "route", href: routeHref });
+  }, [routeHref]);
+
+  useEffect(() => {
+    if (mode !== "generate") setPickedGen(null);
+  }, [mode]);
+
+  useEffect(() => {
+    const onPop = () => {
+      const next = parseAppUrl(window.location.pathname, window.location.search);
+      skipUrlSync.current = true;
+      setMode(next.mode);
+      setBrowseKind(next.browseKind);
+      setViewFolderId(next.viewFolderId);
+      setTagFilter(next.tagFilter);
+      setColorFilter(next.colorFilter);
+      setPicked(null);
+      setSelected(null);
+      if (next.browsePath) {
+        setBrowsePath(next.browsePath);
+        return;
+      }
+      setBrowsePath(
+        defaultBrowsePath(next.browseKind, {
+          volumes: volumesRoot,
+          local: localRoot,
+          hub: hubRoot,
+        }),
+      );
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [volumesRoot, localRoot, hubRoot]);
 
   const hideFromSidebar = useCallback((path: string, name: string) => {
     setSidebarHidden((prev) => {
@@ -763,20 +957,27 @@ export default function App() {
     setInfo(lib);
     setFolders(folds);
     setTags(tagList);
+    const isFeed = (a: Asset) => a.sourceKind === "web" || a.sourceKind === "plugin";
     let list: Asset[];
     if (tagFilter) {
       const tagged = await invoke<Asset[]>("search_assets", {
         query: { tag: tagFilter, useClip: false, limit: 400 },
       });
-      list = tagged.filter(
-        (a) => a.sourceKind === "web" && (!ref || a.sourceRef === ref),
-      );
-    } else {
+      list = tagged.filter((a) => isFeed(a) && (!ref || a.sourceRef === ref));
+    } else if (ref) {
       list = await invoke<Asset[]>("list_assets", {
         sourceKind: "web",
-        sourceRef: ref ?? null,
+        sourceRef: ref,
         limit: 400,
       });
+    } else {
+      const [web, plugin] = await Promise.all([
+        invoke<Asset[]>("list_assets", { sourceKind: "web", limit: 400 }),
+        invoke<Asset[]>("list_assets", { sourceKind: "plugin", limit: 400 }),
+      ]);
+      list = [...web, ...plugin].sort((a, b) =>
+        (b.createdAt || "").localeCompare(a.createdAt || ""),
+      );
     }
     setAssets(list);
   }, [tagFilter]);
@@ -883,6 +1084,14 @@ export default function App() {
         return { ...data, path: target };
       });
       setBrowseError(null);
+      console.info("[inspirex]", {
+        event: "browse_grid",
+        layout: "masonry",
+        path: target,
+        media: shown,
+        folders: data.folders.length,
+        append,
+      });
       const atIndexVirtual =
         (browseKind === "local" && isKindVirtualPath(target, root || LOCAL_VIRTUAL)) ||
         (browseKind === "volumes" && isKindVirtualPath(target, root || VOLUMES_VIRTUAL));
@@ -988,6 +1197,70 @@ export default function App() {
     ],
   );
 
+  const togglePickedTag = useCallback(
+    async (tag: FinderTag, remove: boolean) => {
+      if (!picked) return;
+      try {
+        await invoke<number>("apply_finder_tag", {
+          paths: [picked.path],
+          tag: tag.name,
+          color: tag.color,
+          remove,
+        });
+        const next = await invoke<FinderTagValue[]>("get_finder_tags", {
+          path: picked.path,
+        });
+        setPickedTags(next);
+        setStatus(remove ? `已去掉「${tag.name}」` : `已贴上「${tag.name}」`);
+        console.info("[inspirex]", {
+          event: "detail_tag",
+          path: picked.path,
+          tag: tag.name,
+          remove,
+        });
+        if (tagFilterRef.current) await refreshBrowse(browsePath);
+      } catch (e) {
+        setStatus(`标签失败: ${e}`);
+      }
+    },
+    [picked, browsePath, refreshBrowse],
+  );
+
+  const addPickedTagByName = useCallback(async () => {
+    const name = pickedTagDraft.trim();
+    if (!name || !picked) return;
+    const existing =
+      visibleFinderTags.find((t) => t.name === name) ??
+      FINDER_PALETTE.find((t) => t.name === name) ??
+      customFinderTags.find((t) => t.name === name);
+    let tag = existing;
+    if (!tag) {
+      const used = new Set(tags.map((t) => t.color).filter(Boolean));
+      const pal = FINDER_PALETTE.find((p) => !used.has(p.hex)) ?? FINDER_PALETTE[6];
+      tag = { name, color: pal.color, hex: pal.hex };
+      setCustomFinderTags((prev) => {
+        const list = [...prev, tag!];
+        saveFinderCustom(list);
+        return list;
+      });
+      try {
+        await invoke("create_tag", { name, color: pal.hex });
+        setTags(await invoke<Tag[]>("list_tags"));
+      } catch {
+        /* 侧栏标签仍可用 */
+      }
+    }
+    setPickedTagDraft("");
+    await togglePickedTag(tag, false);
+  }, [
+    pickedTagDraft,
+    picked,
+    visibleFinderTags,
+    customFinderTags,
+    tags,
+    togglePickedTag,
+  ]);
+
   const loadMoreBrowse = useCallback(() => {
     const cur = listingRef.current;
     if (!browsePath || !cur?.truncated || busy) return;
@@ -1008,11 +1281,21 @@ export default function App() {
       .then((r) => {
         const root = r || VOLUMES_VIRTUAL;
         setVolumesRoot(root);
-        setBrowsePath((cur) => cur ?? root);
+        setBrowsePath((cur) => {
+          if (cur) return cur;
+          const landed = bootRef.current;
+          if (landed.mode === "browse" && landed.browseKind === "volumes") return root;
+          return cur;
+        });
       })
       .catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
-        setBrowsePath((cur) => cur ?? VOLUMES_VIRTUAL);
+        setBrowsePath((cur) => {
+          if (cur) return cur;
+          const landed = bootRef.current;
+          if (landed.mode === "browse" && landed.browseKind === "volumes") return VOLUMES_VIRTUAL;
+          return cur;
+        });
         setBrowseError(msg);
         setStatus(`浏览根目录失败: ${msg}`);
       });
@@ -1020,7 +1303,16 @@ export default function App() {
       .then(setVolumeRoots)
       .catch(() => undefined);
     invoke<string>("get_browse_root", { kind: "local" })
-      .then((r) => setLocalRoot(r || LOCAL_VIRTUAL))
+      .then((r) => {
+        const root = r || LOCAL_VIRTUAL;
+        setLocalRoot(root);
+        setBrowsePath((cur) => {
+          if (cur) return cur;
+          const landed = bootRef.current;
+          if (landed.mode === "browse" && landed.browseKind === "local") return root;
+          return cur;
+        });
+      })
       .catch(() => setLocalRoot(LOCAL_VIRTUAL));
     invoke<PinnedFolder[]>("list_index_roots", { kind: "local" })
       .then(setLocalRoots)
@@ -1029,11 +1321,18 @@ export default function App() {
       .then((s) => {
         setHubRoot(s.path);
         setHubSuggestions(s.suggestions);
+        setBrowsePath((cur) => {
+          if (cur) return cur;
+          const landed = bootRef.current;
+          if (landed.mode === "browse" && landed.browseKind === "hub") return s.path || null;
+          return cur;
+        });
       })
       .catch(() => undefined);
   }, []);
 
   useEffect(() => {
+    setPickedTagDraft("");
     if (!picked) {
       setPickedTags([]);
       return;
@@ -1261,21 +1560,10 @@ export default function App() {
     }
   };
 
-  const onBindHub = async () => {
-    try {
-      const pickedDir = await pickDirectory();
-      if (!pickedDir.ok) {
-        if (pickedDir.reason === "need-path") {
-          setPathAsk("hub");
-          setPathDraft(hubRoot || hubSuggestions[0]?.path || "");
-          setStatus("请填写 iCloud / Dropbox 等已同步文件夹的绝对路径");
-        }
-        return;
-      }
-      await bindHubFromPath(pickedDir.paths[0]);
-    } catch (e) {
-      setStatus(`绑定中转站失败: ${e}`);
-    }
+  const onBindHub = () => {
+    console.info("[inspirex]", { event: "folder_picker_open", purpose: "hub", kind: "local" });
+    setFolderPicker({ purpose: "hub", kind: "local" });
+    setStatus("在弹窗里选择 iCloud / Dropbox 等已同步文件夹");
   };
 
   const onCopyIntoHub = async () => {
@@ -1341,45 +1629,48 @@ export default function App() {
     }
   };
 
-  const onAddDisplayFolder = async () => {
+  const onAddDisplayFolder = () => {
+    const kind: FolderPickerKind =
+      mode === "browse" && browseKind === "volumes" ? "volumes" : "local";
+    console.info("[inspirex]", {
+      event: "folder_picker_open",
+      purpose: "index",
+      kind,
+      mode,
+      browseKind,
+    });
+    setFolderPicker({ purpose: "index", kind });
+    setStatus(
+      kind === "volumes" ? "在弹窗里选择外置卷上的文件夹" : "在弹窗里选择要绑定的文件夹",
+    );
+  };
+
+  const onPickFolder = async (path: string) => {
+    const purpose = folderPicker?.purpose;
+    setFolderPicker(null);
     try {
-      const pickedDir = await pickDirectory();
-      if (!pickedDir.ok) {
-        if (pickedDir.reason === "need-path") {
-          setPathAsk("folder");
-          setPathDraft(
-            browseKind === "local" || browseKind === "volumes"
-              ? sourceNavRoot || ""
-              : browsePath && !browsePath.startsWith("inspirex://")
-                ? browsePath
-                : browseRoot,
-          );
-          setStatus(
-            browseKind === "local"
-              ? "请填写要绑定到本地库的文件夹绝对路径"
-              : browseKind === "volumes"
-                ? "请填写要绑定到外置卷的文件夹绝对路径"
-                : "桌面对话框不可用，请确认或粘贴文件夹绝对路径",
-          );
-        }
+      if (purpose === "hub") {
+        await bindHubFromPath(path);
         return;
       }
-      await addDisplayFolderFromPath(pickedDir.paths[0]);
+      await addDisplayFolderFromPath(path);
     } catch (e) {
-      setStatus(`追加文件夹失败: ${e}`);
+      setStatus(purpose === "hub" ? `绑定中转站失败: ${e}` : `追加文件夹失败: ${e}`);
     }
   };
 
+  const folderPickerCopy = folderPicker
+    ? folderPicker.purpose === "hub"
+      ? { title: "选择中转站文件夹", confirmLabel: "绑定" }
+      : mode === "library"
+        ? { title: "选择要导入的文件夹", confirmLabel: "导入" }
+        : folderPicker.kind === "volumes"
+          ? { title: "选择外置卷文件夹", confirmLabel: "绑定" }
+          : { title: "选择本地文件夹", confirmLabel: "绑定" }
+    : null;
+
   const onConfirmPathAsk = async () => {
     try {
-      if (pathAsk === "folder") {
-        await addDisplayFolderFromPath(pathDraft);
-        return;
-      }
-      if (pathAsk === "hub") {
-        await bindHubFromPath(pathDraft);
-        return;
-      }
       if (pathAsk === "hub-files") {
         const paths = splitPathList(pathDraft);
         if (paths.length === 0) {
@@ -1401,15 +1692,7 @@ export default function App() {
         await importPathsToLibrary(paths);
       }
     } catch (e) {
-      const msg =
-        pathAsk === "folder"
-          ? `追加文件夹失败: ${e}`
-          : pathAsk === "hub"
-            ? `绑定中转站失败: ${e}`
-            : pathAsk === "hub-files"
-              ? `存入中转站失败: ${e}`
-              : `导入失败: ${e}`;
-      setStatus(msg);
+      setStatus(pathAsk === "hub-files" ? `存入中转站失败: ${e}` : `导入失败: ${e}`);
     }
   };
 
@@ -1579,10 +1862,22 @@ export default function App() {
   };
 
   const openAssetDetail = (a: Asset) => {
+    setPickedGen(null);
     setSelected(a);
     setTagDraft(a.tags.join(", "));
     setNotesDraft(a.notes || "");
     setSourceDraft(a.sourceUrl || "");
+  };
+
+  const openGenDetail = (path: string, jobId: string) => {
+    setSelected(null);
+    setPicked(null);
+    setPickedGen({ path, jobId });
+    console.info("[inspirex]", {
+      event: "gen_preview",
+      job_id: jobId,
+      file: fileBaseName(path),
+    });
   };
 
   const onSaveTags = async () => {
@@ -1695,6 +1990,19 @@ export default function App() {
     }
   };
 
+  const onRevealGen = async (path: string) => {
+    try {
+      if (!hasTauriIpc()) {
+        setStatus("在 Finder 显示需要灵犀窗口");
+        return;
+      }
+      await revealItemInDir(path);
+      setStatus(`已在 Finder 显示: ${fileBaseName(path)}`);
+    } catch (e) {
+      setStatus(`显示失败: ${e}`);
+    }
+  };
+
   const onCreateSource = async () => {
     const url = sourceUrl.trim();
     if (!url) {
@@ -1801,6 +2109,12 @@ export default function App() {
     return genJobs.find((j) => j.status === "generated" && (j.outputPaths?.length ?? 0) > 0) ?? null;
   }, [genJobs, genFilterId]);
 
+  const genJob = genJobs.find((j) => j.id === genFilterId) ?? null;
+  const genStaging = genJob?.status === "generated" ? genJob.outputPaths ?? [] : [];
+  const pickedGenJob = pickedGen
+    ? genJobs.find((j) => j.id === pickedGen.jobId) ?? null
+    : null;
+
   const onImportGen = async (jobId?: string) => {
     const id = jobId || importableJob?.id;
     if (!id) {
@@ -1815,6 +2129,7 @@ export default function App() {
         folderId,
       });
       setGenFilterId(job.id);
+      setPickedGen(null);
       await refreshGenerateResults(job.id);
       setStatus(
         `入库完成 job=${job.id} · ${job.imported} 张` + (job.error ? ` · ${job.error}` : ""),
@@ -1872,6 +2187,7 @@ export default function App() {
   const closeDetail = useCallback(() => {
     setPicked(null);
     setSelected(null);
+    setPickedGen(null);
   }, []);
 
   useEffect(() => {
@@ -1887,7 +2203,7 @@ export default function App() {
         return;
       }
       if (e.key === "Escape") {
-        if (picked || selected) {
+        if (picked || selected || pickedGen) {
           closeDetail();
           return;
         }
@@ -1923,6 +2239,7 @@ export default function App() {
     listing,
     selected,
     picked,
+    pickedGen,
     onDeleteAsset,
   ]);
 
@@ -2045,103 +2362,204 @@ export default function App() {
           <div className="brand-sub">InspireX</div>
         </div>
 
-        <button
+        <a
           className={`nav-item ${
             mode === "library" && !viewFolderId && folderId === null && !tagFilter && !colorFilter
               ? "active"
               : ""
           }`}
-          type="button"
-          onClick={() => {
-            setMode("library");
-            setViewFolderId(null);
-            setPicked(null);
-            setFolderId(null);
-            setColorFilter(null);
-            setQuery("");
-          }}
+          href={PATHS.library}
+          onClick={(e) =>
+            spaNav(e, () => {
+              setMode("library");
+              setViewFolderId(null);
+              setPicked(null);
+              setFolderId(null);
+              setColorFilter(null);
+              setQuery("");
+            })
+          }
         >
           全部素材
-        </button>
+        </a>
         <div className="nav-label">来源</div>
-        <button
+        <a
           className={`nav-item ${mode === "browse" && browseKind === "volumes" && !viewFolderId ? "active" : ""}`}
-          type="button"
-          onClick={() => {
-            setMode("browse");
-            setBrowseKind("volumes");
-            setViewFolderId(null);
-            setSelected(null);
-            setPicked(null);
-            if (browseKind === "volumes" && browsePath === volumesRoot) {
-              refreshBrowse(volumesRoot || VOLUMES_VIRTUAL).catch((e) => setStatus(String(e)));
-            } else {
-              setBrowsePath(volumesRoot || VOLUMES_VIRTUAL);
-            }
-          }}
+          href={PATHS.volumes}
+          onClick={(e) =>
+            spaNav(e, () => {
+              setMode("browse");
+              setBrowseKind("volumes");
+              setViewFolderId(null);
+              setSelected(null);
+              setPicked(null);
+              if (browseKind === "volumes" && browsePath === volumesRoot) {
+                refreshBrowse(volumesRoot || VOLUMES_VIRTUAL).catch((err) => setStatus(String(err)));
+              } else {
+                setBrowsePath(volumesRoot || VOLUMES_VIRTUAL);
+              }
+            })
+          }
         >
           外置卷
-        </button>
-        <button
+        </a>
+        <a
           className={`nav-item ${mode === "browse" && browseKind === "local" && !viewFolderId ? "active" : ""}`}
-          type="button"
-          onClick={() => {
-            setMode("browse");
-            setBrowseKind("local");
-            setViewFolderId(null);
-            setSelected(null);
-            setPicked(null);
-            if (browseKind === "local" && browsePath === localRoot) {
-              refreshBrowse(localRoot || LOCAL_VIRTUAL).catch((e) => setStatus(String(e)));
-            } else {
-              setBrowsePath(localRoot || LOCAL_VIRTUAL);
-            }
-          }}
+          href={PATHS.local}
+          onClick={(e) =>
+            spaNav(e, () => {
+              setMode("browse");
+              setBrowseKind("local");
+              setViewFolderId(null);
+              setSelected(null);
+              setPicked(null);
+              if (browseKind === "local" && browsePath === localRoot) {
+                refreshBrowse(localRoot || LOCAL_VIRTUAL).catch((err) => setStatus(String(err)));
+              } else {
+                setBrowsePath(localRoot || LOCAL_VIRTUAL);
+              }
+            })
+          }
         >
           本地库
-        </button>
-        <button
+        </a>
+        <a
           className={`nav-item ${mode === "browse" && browseKind === "hub" && !viewFolderId ? "active" : ""}`}
-          type="button"
-          onClick={() => {
-            setMode("browse");
-            setBrowseKind("hub");
-            setViewFolderId(null);
-            setSelected(null);
-            setPicked(null);
-            if (browseKind === "hub" && (browsePath === hubRoot || (!hubRoot && !browsePath))) {
-              refreshBrowse(hubRoot || null).catch((e) => setStatus(String(e)));
-            } else {
-              setBrowsePath(hubRoot || null);
-            }
-          }}
+          href={PATHS.hub}
+          onClick={(e) =>
+            spaNav(e, () => {
+              setMode("browse");
+              setBrowseKind("hub");
+              setViewFolderId(null);
+              setSelected(null);
+              setPicked(null);
+              if (browseKind === "hub" && (browsePath === hubRoot || (!hubRoot && !browsePath))) {
+                refreshBrowse(hubRoot || null).catch((err) => setStatus(String(err)));
+              } else {
+                setBrowsePath(hubRoot || null);
+              }
+            })
+          }
         >
           中转站
-        </button>
-        <button
+        </a>
+        <a
           className={`nav-item ${mode === "subscribe" && !viewFolderId ? "active" : ""}`}
-          type="button"
-          onClick={() => {
-            setMode("subscribe");
-            setViewFolderId(null);
-            setSelected(null);
-            setPicked(null);
-          }}
+          href={PATHS.subscribe}
+          onClick={(e) =>
+            spaNav(e, () => {
+              setMode("subscribe");
+              setViewFolderId(null);
+              setSelected(null);
+              setPicked(null);
+            })
+          }
         >
           订阅源
-        </button>
-        <button
+        </a>
+        <a
           className={`nav-item ${mode === "generate" && !viewFolderId ? "active" : ""}`}
-          type="button"
-          onClick={() => {
-            setMode("generate");
-            setViewFolderId(null);
-            setSelected(null);
-            setPicked(null);
-          }}
+          href={PATHS.generate}
+          onClick={(e) =>
+            spaNav(e, () => {
+              setMode("generate");
+              setViewFolderId(null);
+              setSelected(null);
+              setPicked(null);
+            })
+          }
         >
           AI 生图
-        </button>
+        </a>
+
+        {mode === "browse" ? (
+          <>
+            <div className="nav-label">
+              {browseKind === "local" || browseKind === "volumes" ? "索引目录" : "常用"}
+              <button
+                type="button"
+                className="linkish"
+                title={
+                  browseKind === "local" || browseKind === "volumes"
+                    ? "绑定要索引的文件夹"
+                    : "追加要展示的文件夹"
+                }
+                onClick={onAddDisplayFolder}
+              >
+                +
+              </button>
+            </div>
+            {suggestedVisible.map((p) => {
+              const indexed =
+                (browseKind === "local" && localRoots.some((r) => r.path === p.path)) ||
+                (browseKind === "volumes" && volumeRoots.some((r) => r.path === p.path));
+              return (
+              <div
+                key={p.path}
+                className={`nav-row ${browsePath === p.path ? "active" : ""}`}
+              >
+                <a
+                  className="nav-item"
+                  href={toHref({
+                    mode: "browse",
+                    browseKind: volumeRoots.some(
+                      (r) =>
+                        p.path === r.path ||
+                        p.path.startsWith(`${r.path.replace(/\/$/, "")}/`),
+                    )
+                      ? "volumes"
+                      : hubRoot &&
+                          (p.path === hubRoot ||
+                            p.path.startsWith(`${hubRoot.replace(/\/$/, "")}/`))
+                        ? "hub"
+                        : "local",
+                    viewFolderId: null,
+                    browsePath: p.path,
+                    tagFilter: null,
+                    colorFilter: null,
+                  })}
+                  onClick={(e) => {
+                    spaNav(e, () => {
+                      setViewFolderId(null);
+                      setTagFilter(null);
+                      if (volumeRoots.some((r) => p.path === r.path || p.path.startsWith(r.path.replace(/\/$/, "") + "/"))) {
+                        setBrowseKind("volumes");
+                      } else if (hubRoot && (p.path === hubRoot || p.path.startsWith(hubRoot.replace(/\/$/, "") + "/"))) {
+                        setBrowseKind("hub");
+                      } else {
+                        setBrowseKind("local");
+                      }
+                      setBrowsePath(p.path);
+                    });
+                  }}
+                >
+                  {p.name}
+                </a>
+                <button
+                  type="button"
+                  className="nav-del"
+                  title={indexed ? "解除索引（不删原文件）" : "从侧栏隐藏（不删原文件）"}
+                  aria-label={`隐藏 ${p.name}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (browseKind === "local" && localRoots.some((r) => r.path === p.path)) {
+                      unbindIndex("local", p.path, p.name).catch(() => undefined);
+                      return;
+                    }
+                    if (browseKind === "volumes" && volumeRoots.some((r) => r.path === p.path)) {
+                      unbindIndex("volumes", p.path, p.name).catch(() => undefined);
+                      return;
+                    }
+                    hideFromSidebar(p.path, p.name);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+              );
+            })}
+          </>
+        ) : null}
 
         <div className="nav-label">
           文件夹
@@ -2162,16 +2580,16 @@ export default function App() {
             key={f.id}
             className={`nav-row ${viewFolderId === f.id ? "active" : ""}`}
           >
-            <button
-              type="button"
+            <a
               className="nav-item"
-              onClick={() => openVirtualFolder(f.id)}
+              href={folderPath(f.id)}
+              onClick={(e) => spaNav(e, () => openVirtualFolder(f.id))}
             >
               {f.parentId ? `└ ${f.name}` : f.name}
               {f.itemCount ? (
                 <span className="nav-count">{f.itemCount}</span>
               ) : null}
-            </button>
+            </a>
             <button
               type="button"
               className="nav-tag-apply"
@@ -2195,75 +2613,6 @@ export default function App() {
 
         {mode === "browse" ? (
           <>
-            {suggestedVisible.length > 0 || mode === "browse" ? (
-              <>
-                <div className="nav-label">
-                  {browseKind === "local" || browseKind === "volumes" ? "索引目录" : "常用"}
-                  <button
-                    type="button"
-                    className="linkish"
-                    title={
-                      browseKind === "local" || browseKind === "volumes"
-                        ? "绑定要索引的文件夹"
-                        : "追加要展示的文件夹"
-                    }
-                    onClick={onAddDisplayFolder}
-                  >
-                    +
-                  </button>
-                </div>
-                {suggestedVisible.map((p) => {
-                  const indexed =
-                    (browseKind === "local" && localRoots.some((r) => r.path === p.path)) ||
-                    (browseKind === "volumes" && volumeRoots.some((r) => r.path === p.path));
-                  return (
-                  <div
-                    key={p.path}
-                    className={`nav-row ${browsePath === p.path ? "active" : ""}`}
-                  >
-                    <button
-                      type="button"
-                      className="nav-item"
-                      onClick={() => {
-                        setViewFolderId(null);
-                        setTagFilter(null);
-                        if (volumeRoots.some((r) => p.path === r.path || p.path.startsWith(r.path.replace(/\/$/, "") + "/"))) {
-                          setBrowseKind("volumes");
-                        } else if (hubRoot && (p.path === hubRoot || p.path.startsWith(hubRoot.replace(/\/$/, "") + "/"))) {
-                          setBrowseKind("hub");
-                        } else {
-                          setBrowseKind("local");
-                        }
-                        setBrowsePath(p.path);
-                      }}
-                    >
-                      {p.name}
-                    </button>
-                    <button
-                      type="button"
-                      className="nav-del"
-                      title={indexed ? "解除索引（不删原文件）" : "从侧栏隐藏（不删原文件）"}
-                      aria-label={`隐藏 ${p.name}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (browseKind === "local" && localRoots.some((r) => r.path === p.path)) {
-                          unbindIndex("local", p.path, p.name).catch(() => undefined);
-                          return;
-                        }
-                        if (browseKind === "volumes" && volumeRoots.some((r) => r.path === p.path)) {
-                          unbindIndex("volumes", p.path, p.name).catch(() => undefined);
-                          return;
-                        }
-                        hideFromSidebar(p.path, p.name);
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                  );
-                })}
-              </>
-            ) : null}
             {!sourceNavRoot && !tagFilter && browseKind !== "local" && browseKind !== "volumes" ? (
               <>
                 <div className="nav-label">
@@ -2284,17 +2633,26 @@ export default function App() {
                     key={f.path}
                     className={`nav-row ${browsePath === f.path ? "active" : ""}`}
                   >
-                    <button
-                      type="button"
+                    <a
                       className="nav-item"
-                      onClick={() => {
-                        setViewFolderId(null);
-                        setTagFilter(null);
-                        setBrowsePath(f.path);
-                      }}
+                      href={toHref({
+                        mode: "browse",
+                        browseKind,
+                        viewFolderId: null,
+                        browsePath: f.path,
+                        tagFilter: null,
+                        colorFilter: null,
+                      })}
+                      onClick={(e) =>
+                        spaNav(e, () => {
+                          setViewFolderId(null);
+                          setTagFilter(null);
+                          setBrowsePath(f.path);
+                        })
+                      }
                     >
                       {f.name}
-                    </button>
+                    </a>
                     <button
                       type="button"
                       className="nav-del"
@@ -2312,17 +2670,26 @@ export default function App() {
               </>
             ) : null}
             {sourceNavRoot && listing?.parent && !tagFilter ? (
-              <button
-                type="button"
+              <a
                 className="nav-item"
-                onClick={() => {
-                  setViewFolderId(null);
-                  setTagFilter(null);
-                  setBrowsePath(listing.parent!);
-                }}
+                href={toHref({
+                  mode: "browse",
+                  browseKind,
+                  viewFolderId: null,
+                  browsePath: listing.parent,
+                  tagFilter: null,
+                  colorFilter: null,
+                })}
+                onClick={(e) =>
+                  spaNav(e, () => {
+                    setViewFolderId(null);
+                    setTagFilter(null);
+                    setBrowsePath(listing.parent!);
+                  })
+                }
               >
                 ↑ 上级
-              </button>
+              </a>
             ) : null}
           </>
         ) : null}
@@ -2408,13 +2775,20 @@ export default function App() {
         <header className="toolbar">
           {viewFolderId ? (
             <div className="crumbs">
-              <button
-                type="button"
+              <a
                 className="crumb"
-                onClick={() => setViewFolderId(null)}
+                href={toHref({
+                  mode,
+                  browseKind,
+                  viewFolderId: null,
+                  browsePath,
+                  tagFilter: null,
+                  colorFilter: null,
+                })}
+                onClick={(e) => spaNav(e, () => setViewFolderId(null))}
               >
                 返回
-              </button>
+              </a>
               <span className="crumb-sep">/</span>
               <span className="crumb">
                 {folders.find((f) => f.id === viewFolderId)?.name ?? "文件夹"}
@@ -2425,17 +2799,26 @@ export default function App() {
               {crumb.map((c, i) => (
                 <span key={c.path}>
                   {i > 0 ? <span className="crumb-sep">/</span> : null}
-                  <button
-                    type="button"
+                  <a
                     className="crumb"
-                    onClick={() => {
-                      setTagFilter(null);
-                      setViewFolderId(null);
-                      setBrowsePath(c.path);
-                    }}
+                    href={toHref({
+                      mode: "browse",
+                      browseKind,
+                      viewFolderId: null,
+                      browsePath: c.path,
+                      tagFilter: null,
+                      colorFilter: null,
+                    })}
+                    onClick={(e) =>
+                      spaNav(e, () => {
+                        setTagFilter(null);
+                        setViewFolderId(null);
+                        setBrowsePath(c.path);
+                      })
+                    }
                   >
                     {c.name}
-                  </button>
+                  </a>
                 </span>
               ))}
             </div>
@@ -2548,17 +2931,7 @@ export default function App() {
                 value={pathDraft}
                 onChange={(e) => setPathDraft(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && onConfirmPathAsk()}
-                placeholder={
-                  pathAsk === "folder"
-                    ? browseKind === "local"
-                      ? "要绑定的文件夹绝对路径，例如 /Users/me/Pictures"
-                      : browseKind === "volumes"
-                        ? "外置卷上的文件夹，例如 /Volumes/Lexar/素材"
-                        : "文件夹绝对路径，例如 /Volumes/Q-V-P/素材"
-                    : pathAsk === "hub"
-                      ? "云同步文件夹路径，例如 iCloud 云盘/InspireX-Hub"
-                      : "文件绝对路径，逗号或换行分隔"
-                }
+                placeholder="文件绝对路径，逗号或换行分隔"
                 autoFocus
               />
               <button type="button" className="primary" onClick={onConfirmPathAsk} disabled={busy}>
@@ -2611,9 +2984,7 @@ export default function App() {
                       className="card-body"
                       onClick={() => setPicked(m)}
                     >
-                      <div className="thumb">
-                        <ExternalThumb item={m} />
-                      </div>
+                      <ExternalThumb item={m} />
                       <div className="card-meta">
                         <span className="name">{m.name}</span>
                         <span className="badge">链接</span>
@@ -2648,14 +3019,14 @@ export default function App() {
                       onPointerCancel={onLibCardPointerCancel}
                       title="单击详情 · 拖动可拖出"
                     >
-                      <div
-                        className="thumb"
-                        style={{ background: a.dominantColor || "var(--surface-2)" }}
-                      >
-                        {libraryRoot ? (
-                          <img src={assetSrc(libraryRoot, a)} alt={a.filename} loading="lazy" />
-                        ) : null}
-                      </div>
+                      <RatioThumb
+                        src={libraryRoot ? assetSrc(libraryRoot, a) : null}
+                        alt={a.filename}
+                        cacheKey={a.id}
+                        width={a.width}
+                        height={a.height}
+                        background={a.dominantColor || undefined}
+                      />
                       <div className="card-meta">
                         <span className="name">{a.filename}</span>
                         <span className="badge">库</span>
@@ -2815,9 +3186,7 @@ export default function App() {
                       className="card-body"
                       onClick={(e) => onBrowseMediaClick(m, e)}
                     >
-                      <div className="thumb">
-                        <ExternalThumb item={m} />
-                      </div>
+                      <ExternalThumb item={m} />
                       <div className="card-meta">
                         <span className="name">{m.name}</span>
                         <span className="badge">{m.kind === "video" ? "VIDEO" : "IMG"}</span>
@@ -2969,7 +3338,7 @@ export default function App() {
                     <p>
                       {tagFilter
                         ? `没有带「${tagFilter}」标签的订阅图片。`
-                        : "还没有订阅图片。添加 RSS 或公开网页并拉取后会显示在这里。"}
+                        : "还没有订阅图片。添加 RSS / 公开网页并拉取，或用浏览器插件保存后，会显示在这里。"}
                     </p>
                   </div>
                 ) : (
@@ -2985,14 +3354,14 @@ export default function App() {
                       title="单击详情 · 拖动可拖出"
                       style={{ borderColor: a.dominantColor || "transparent" }}
                     >
-                      <div
-                        className="thumb"
-                        style={{ background: a.dominantColor || "var(--surface-2)" }}
-                      >
-                        {libraryRoot ? (
-                          <img src={assetSrc(libraryRoot, a)} alt={a.filename} loading="lazy" />
-                        ) : null}
-                      </div>
+                      <RatioThumb
+                        src={libraryRoot ? assetSrc(libraryRoot, a) : null}
+                        alt={a.filename}
+                        cacheKey={a.id}
+                        width={a.width}
+                        height={a.height}
+                        background={a.dominantColor || undefined}
+                      />
                       <div className="card-meta">
                         <span className="name">{a.filename}</span>
                         <span className="badge">{sourceKindLabel(a.sourceKind)}</span>
@@ -3080,7 +3449,10 @@ export default function App() {
                 <div
                   key={j.id}
                   className={`job-row ${genFilterId === j.id ? "source-card-active" : ""}`}
-                  onClick={() => setGenFilterId(j.id)}
+                  onClick={() => {
+                    setGenFilterId(j.id);
+                    setPickedGen(null);
+                  }}
                 >
                   <div>
                     <div className="name">{j.prompt}</div>
@@ -3111,55 +3483,125 @@ export default function App() {
             <div className="panel-right">
               <div className="result-head">
                 <span>
-                  结果
-                  {genFilterId ? " · 本次任务" : " · 全部"}
-                  {" "}
-                  {(() => {
-                    const job = genJobs.find((j) => j.id === genFilterId);
-                    if (job?.status === "generated") {
-                      return `${job.outputPaths?.length ?? 0} 张待入库`;
-                    }
-                    return `${assets.length} 张`;
-                  })()}
+                  {pickedGen ? "详情" : "结果"}
+                  {pickedGen
+                    ? ` · ${fileBaseName(pickedGen.path)}`
+                    : genFilterId
+                      ? " · 本次任务"
+                      : " · 全部"}
+                  {pickedGen
+                    ? ""
+                    : ` ${genJob?.status === "generated" ? `${genStaging.length} 张待入库` : `${assets.length} 张`}`}
                 </span>
-                {genFilterId ? (
+                {pickedGen ? (
+                  <button type="button" className="linkish linkish-sm" onClick={() => setPickedGen(null)}>
+                    返回结果
+                  </button>
+                ) : genFilterId ? (
                   <button type="button" className="linkish linkish-sm" onClick={() => setGenFilterId(null)}>
                     看全部
                   </button>
                 ) : null}
               </div>
+              {pickedGen ? (
+                <div className="gen-detail">
+                  {(pickedGenJob?.outputPaths?.length ?? 0) > 1 ? (
+                    <div className="gen-strip">
+                      {(pickedGenJob?.outputPaths ?? []).map((p) => (
+                        <button
+                          key={p}
+                          type="button"
+                          className={`card gen-strip-card ${pickedGen.path === p ? "card-active" : ""}`}
+                          onClick={() => openGenDetail(p, pickedGen.jobId)}
+                          title={fileBaseName(p)}
+                        >
+                          <RatioThumb src={convertFileSrc(p)} alt={fileBaseName(p)} cacheKey={`strip-${p}`} />
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="gen-detail-preview">
+                    <img src={convertFileSrc(pickedGen.path)} alt={fileBaseName(pickedGen.path)} />
+                  </div>
+                  <h2>{fileBaseName(pickedGen.path)}</h2>
+                  <dl>
+                    <div>
+                      <dt>描述</dt>
+                      <dd>{pickedGenJob?.prompt || "—"}</dd>
+                    </div>
+                    <div>
+                      <dt>尺寸</dt>
+                      <dd>{pickedGenJob?.size || "—"}</dd>
+                    </div>
+                    <div>
+                      <dt>模型</dt>
+                      <dd>
+                        {pickedGenJob
+                          ? `${pickedGenJob.provider}/${pickedGenJob.model}`
+                          : "—"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>状态</dt>
+                      <dd>待入库</dd>
+                    </div>
+                    <div>
+                      <dt>路径</dt>
+                      <dd className="path-dd">{pickedGen.path}</dd>
+                    </div>
+                  </dl>
+                  <p className="hint">确认后再入库，写入素材库。同一任务会一并入库。</p>
+                  <div className="detail-actions">
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={busy || !pickedGenJob}
+                      onClick={() => onImportGen(pickedGen.jobId)}
+                    >
+                      {busy ? "处理中…" : "入库"}
+                    </button>
+                    <button type="button" onClick={() => onRevealGen(pickedGen.path)}>
+                      Finder 显示
+                    </button>
+                  </div>
+                </div>
+              ) : (
               <section className="grid result-grid">
-                {(() => {
-                  const job = genJobs.find((j) => j.id === genFilterId);
-                  const staging =
-                    job?.status === "generated" ? job.outputPaths ?? [] : [];
-                  if (staging.length > 0) {
-                    return staging.map((p) => (
-                      <div key={p} className="card">
-                        <div className="thumb" style={{ background: "var(--surface-2)" }}>
-                          <img src={convertFileSrc(p)} alt={fileBaseName(p)} loading="lazy" />
-                        </div>
-                        <div className="card-meta">
-                          <span className="name">{fileBaseName(p)}</span>
-                          <span className="badge">待入库</span>
-                        </div>
+                {genStaging.length > 0 ? (
+                  genStaging.map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      className="card"
+                      onClick={() => {
+                        if (!genJob) return;
+                        openGenDetail(p, genJob.id);
+                      }}
+                      title="单击查看详情"
+                    >
+                      <RatioThumb
+                        src={convertFileSrc(p)}
+                        alt={fileBaseName(p)}
+                        cacheKey={p}
+                      />
+                      <div className="card-meta">
+                        <span className="name">{fileBaseName(p)}</span>
+                        <span className="badge">待入库</span>
                       </div>
-                    ));
-                  }
-                  if (assets.length === 0) {
-                    return (
+                    </button>
+                  ))
+                ) : assets.length === 0 ? (
                       <div className="empty">
                         <p>
                           {tagFilter
                             ? `没有带「${tagFilter}」标签的生成图。`
-                            : job?.status === "generated"
+                            : genJob?.status === "generated"
                               ? "生成文件丢失，请重新生成。"
                               : "先点「生成」预览，再点「入库」写入素材库。"}
                         </p>
                       </div>
-                    );
-                  }
-                  return assets.map((a) => (
+                ) : (
+                  assets.map((a) => (
                     <button
                       key={a.id}
                       type="button"
@@ -3171,22 +3613,23 @@ export default function App() {
                       title="单击详情 · 拖动可拖出"
                       style={{ borderColor: a.dominantColor || "transparent" }}
                     >
-                      <div
-                        className="thumb"
-                        style={{ background: a.dominantColor || "var(--surface-2)" }}
-                      >
-                        {libraryRoot ? (
-                          <img src={assetSrc(libraryRoot, a)} alt={a.filename} loading="lazy" />
-                        ) : null}
-                      </div>
+                      <RatioThumb
+                        src={libraryRoot ? assetSrc(libraryRoot, a) : null}
+                        alt={a.filename}
+                        cacheKey={a.id}
+                        width={a.width}
+                        height={a.height}
+                        background={a.dominantColor || undefined}
+                      />
                       <div className="card-meta">
                         <span className="name">{a.filename}</span>
                         <span className="badge">{sourceKindLabel(a.sourceKind)}</span>
                       </div>
                     </button>
-                  ));
-                })()}
+                  ))
+                )}
               </section>
+              )}
             </div>
           </section>
         ) : (
@@ -3227,14 +3670,14 @@ export default function App() {
                     onPointerCancel={onLibCardPointerCancel}
                     title="单击详情 · 拖动可拖出到其他应用"
                   >
-                    <div
-                      className="thumb"
-                      style={{ background: a.dominantColor || "var(--surface-2)" }}
-                    >
-                      {libraryRoot ? (
-                        <img src={assetSrc(libraryRoot, a)} alt={a.filename} loading="lazy" />
-                      ) : null}
-                    </div>
+                    <RatioThumb
+                      src={libraryRoot ? assetSrc(libraryRoot, a) : null}
+                      alt={a.filename}
+                      cacheKey={a.id}
+                      width={a.width}
+                      height={a.height}
+                      background={a.dominantColor || undefined}
+                    />
                     <div className="card-meta">
                       <span className="name">{a.filename}</span>
                       <span className="badge">
@@ -3303,7 +3746,74 @@ export default function App() {
               <dd className="path-dd">{picked.path}</dd>
             </div>
           </dl>
-          <p className="hint">只展示来源文件，不另存副本。点侧栏标签旁 + 可贴标签。</p>
+          <div className="finder-tag-block">
+            <div className="finder-tag-label">标签</div>
+            <div className="finder-tag-row">
+              {visibleFinderTags.map((t) => {
+                const on = pickedTags.some((p) => p.name === t.name);
+                return (
+                  <button
+                    key={t.name}
+                    type="button"
+                    className={`finder-tag-chip${on ? " on" : ""}`}
+                    title={on ? `去掉「${t.name}」` : `贴上「${t.name}」`}
+                    onClick={() => togglePickedTag(t, on)}
+                  >
+                    <span className="tag-dot" style={{ background: t.hex }} />
+                    {t.name}
+                  </button>
+                );
+              })}
+              {pickedTags
+                .filter((p) => !visibleFinderTags.some((t) => t.name === p.name))
+                .map((p) => (
+                  <button
+                    key={p.name}
+                    type="button"
+                    className="finder-tag-chip on"
+                    title={`去掉「${p.name}」`}
+                    onClick={() =>
+                      togglePickedTag(
+                        {
+                          name: p.name,
+                          color: p.color,
+                          hex: hexForFinderColor(p.color),
+                        },
+                        true,
+                      )
+                    }
+                  >
+                    <span
+                      className="tag-dot"
+                      style={{ background: hexForFinderColor(p.color) }}
+                    />
+                    {p.name}
+                  </button>
+                ))}
+            </div>
+            <div className="finder-tag-add">
+              <input
+                value={pickedTagDraft}
+                onChange={(e) => setPickedTagDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addPickedTagByName();
+                  }
+                }}
+                placeholder="新标签，回车贴上"
+              />
+              <button
+                type="button"
+                className="primary"
+                disabled={!pickedTagDraft.trim()}
+                onClick={() => addPickedTagByName()}
+              >
+                贴上
+              </button>
+            </div>
+            <p className="hint">点色块切换；与 Finder 标签相同，不另存副本。</p>
+          </div>
         </aside>
       ) : null}
 
@@ -3414,6 +3924,18 @@ export default function App() {
             </button>
           </div>
         </aside>
+      ) : null}
+      {folderPicker && folderPickerCopy ? (
+        <FolderPicker
+          kind={folderPicker.kind}
+          title={folderPickerCopy.title}
+          confirmLabel={folderPickerCopy.confirmLabel}
+          onPick={onPickFolder}
+          onCancel={() => {
+            setFolderPicker(null);
+            setStatus("");
+          }}
+        />
       ) : null}
     </div>
   );

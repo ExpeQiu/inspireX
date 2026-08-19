@@ -464,6 +464,138 @@ pub fn list_browse_for_kind(
     list_external_dir(&safe, media_limit, media_offset, &root)
 }
 
+/// 选文件夹弹窗的沙箱根：外置卷从 `/Volumes` 起，其余从家目录起。
+pub fn picker_root_for(kind: &str) -> PathBuf {
+    match parse_browse_kind(Some(kind)) {
+        "volumes" => PathBuf::from("/Volumes"),
+        _ => dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users")),
+    }
+}
+
+pub fn list_picker_dir(path: Option<&Path>, kind: &str) -> Result<ExternalListing, String> {
+    let root = picker_root_for(kind);
+    list_picker_dir_under(path, &root)
+}
+
+/// 只列子文件夹，供绑定索引 / 导入时挑选目录（不受已绑定索引约束）。
+pub fn list_picker_dir_under(path: Option<&Path>, root: &Path) -> Result<ExternalListing, String> {
+    let target = match path {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => root.to_path_buf(),
+    };
+    let safe = ensure_under_root(&target, root)?;
+
+    if is_photos_library(&safe) {
+        let parent = safe.parent().map(|p| p.display().to_string());
+        log::info!(
+            target: "inspirex",
+            "picker_list path={} root={} photos_library=1 folders=0",
+            safe.display(),
+            root.display()
+        );
+        return Ok(ExternalListing {
+            root: root.display().to_string(),
+            path: safe.display().to_string(),
+            parent,
+            folders: Vec::new(),
+            media: Vec::new(),
+            truncated: false,
+            total_media: 0,
+        });
+    }
+
+    if !safe.is_dir() {
+        return Err(format!("不是目录: {}", safe.display()));
+    }
+
+    let t0 = std::time::Instant::now();
+    let root_canon = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf());
+    let at_root = same_path(&safe, root);
+    let mut folders = Vec::new();
+
+    let mut entries: Vec<_> = std::fs::read_dir(&safe)
+        .map_err(|e| format!("无法读取 {}: {e}", safe.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name().to_ascii_lowercase());
+
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_hidden_name(&name) {
+            continue;
+        }
+        let p = entry.path();
+        let is_dir = entry
+            .file_type()
+            .map(|t| t.is_dir())
+            .unwrap_or_else(|_| p.is_dir());
+        if !is_dir {
+            continue;
+        }
+        if is_volumes_dir(&safe) && skip_volume_entry(&p, &name) {
+            continue;
+        }
+        if at_root && !is_volumes_dir(&safe) && skip_local_entry(&name) {
+            continue;
+        }
+        let display_name = if is_photos_library(&p) {
+            photos_library_label(&p)
+        } else {
+            name
+        };
+        folders.push(ExternalItem {
+            path: p.display().to_string(),
+            name: display_name,
+            kind: ExternalKind::Folder,
+            file_size: None,
+            modified_at: None,
+            mime: None,
+        });
+    }
+
+    if at_root && !is_volumes_dir(&safe) {
+        for album in photos_libraries_under(&safe.join("Pictures")) {
+            if folders.iter().any(|f| f.path == album.path) {
+                continue;
+            }
+            folders.insert(0, album);
+        }
+    }
+
+    let parent = if at_root {
+        None
+    } else {
+        safe.parent()
+            .filter(|p| {
+                let parent_canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+                parent_canon.starts_with(&root_canon) || parent_canon == root_canon
+            })
+            .map(|p| p.display().to_string())
+    };
+
+    log::info!(
+        target: "inspirex",
+        "picker_list path={} root={} folders={} parent={} ms={}",
+        safe.display(),
+        root.display(),
+        folders.len(),
+        parent.as_deref().unwrap_or(""),
+        t0.elapsed().as_millis()
+    );
+
+    Ok(ExternalListing {
+        root: root.display().to_string(),
+        path: safe.display().to_string(),
+        parent,
+        folders,
+        media: Vec::new(),
+        truncated: false,
+        total_media: 0,
+    })
+}
+
 pub fn hub_config_file() -> PathBuf {
     std::env::var("INSPIREX_HUB_CONFIG")
         .ok()
@@ -1605,5 +1737,48 @@ mod tests {
 
         assert!(ensure_under_kind(Path::new("/Volumes"), "volumes").is_err());
         assert_eq!(remove_index_root("volumes", &a).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn picker_lists_folders_not_files() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("Pictures")).unwrap();
+        fs::create_dir(dir.path().join("Movies")).unwrap();
+        fs::create_dir(dir.path().join("Library")).unwrap();
+        fs::create_dir(dir.path().join(".hidden")).unwrap();
+        fs::write(dir.path().join("a.png"), b"x").unwrap();
+
+        let listing = list_picker_dir_under(None, dir.path()).unwrap();
+        let names: Vec<_> = listing.folders.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"Pictures"));
+        assert!(names.contains(&"Movies"));
+        assert!(!names.contains(&"Library"));
+        assert!(!names.iter().any(|n| n.starts_with('.')));
+        assert!(!names.contains(&"a.png"));
+        assert!(listing.media.is_empty());
+        assert!(listing.parent.is_none());
+    }
+
+    #[test]
+    fn picker_enters_subdir_and_rejects_outside() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("Pictures")).unwrap();
+        fs::create_dir(dir.path().join("Pictures").join("album")).unwrap();
+
+        let inner = list_picker_dir_under(Some(&dir.path().join("Pictures")), dir.path()).unwrap();
+        assert!(inner.parent.is_some());
+        assert!(inner.folders.iter().any(|f| f.name == "album"));
+
+        let err = list_picker_dir_under(Some(Path::new("/tmp")), dir.path()).unwrap_err();
+        assert!(err.contains("仅允许浏览"));
+    }
+
+    #[test]
+    fn picker_root_kind() {
+        assert_eq!(picker_root_for("volumes"), PathBuf::from("/Volumes"));
+        assert_eq!(picker_root_for("VOLUMES"), PathBuf::from("/Volumes"));
+        let home = picker_root_for("local");
+        assert!(!home.as_os_str().is_empty());
+        assert_eq!(picker_root_for("hub"), home);
     }
 }

@@ -139,6 +139,7 @@ pub fn run() {
             commands::set_hub_folder,
             commands::copy_to_hub,
             commands::list_browse_dir,
+            commands::list_picker_dir,
             commands::list_finder_tags,
             commands::list_browse_by_tag,
             commands::get_finder_tags,

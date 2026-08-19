@@ -46,8 +46,62 @@ async function getConfig() {
   return Object.assign({}, DEFAULTS, stored);
 }
 
+async function assertIngestUp(port) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 2500);
+  try {
+    const res = await fetch("http://127.0.0.1:" + port + "/health", { signal: ctrl.signal });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+  } catch (e) {
+    throw new Error("灵犀采集未就绪，请先 ./scripts/start.sh");
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function bytesToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+async function fetchImageInChrome(url, pageUrl) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
+        Referer: pageUrl || "https://www.pinterest.com/",
+      },
+    });
+    if (!res.ok) throw new Error("图片 HTTP " + res.status);
+    const buf = await res.arrayBuffer();
+    if (!buf.byteLength) throw new Error("图片为空");
+    return {
+      base64: bytesToBase64(buf),
+      mime: (res.headers.get("content-type") || "image/jpeg").split(";")[0],
+    };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function saveToInspireX(payload) {
   const cfg = await getConfig();
+  await assertIngestUp(cfg.port);
+  let inline = null;
+  try {
+    inline = await fetchImageInChrome(payload.imageUrl, payload.pageUrl);
+  } catch (e) {
+    console.warn("[inspirex] chrome_fetch_fail", e);
+    throw new Error("浏览器下载图片失败: " + (e && e.message ? e.message : e));
+  }
   const res = await fetch("http://127.0.0.1:" + cfg.port + "/v1/import", {
     method: "POST",
     headers: {
@@ -59,6 +113,8 @@ async function saveToInspireX(payload) {
       pageUrl: payload.pageUrl || null,
       title: payload.title || null,
       notes: payload.notes || null,
+      imageBase64: inline.base64,
+      mime: inline.mime,
     }),
   });
   const data = await res.json();

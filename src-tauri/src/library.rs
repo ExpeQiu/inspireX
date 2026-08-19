@@ -338,6 +338,19 @@ pub fn import_from_url(
     notes: Option<&str>,
     folder_id: Option<String>,
 ) -> Result<ImportResult, String> {
+    import_from_url_bytes(state, image_url, page_url, title, notes, folder_id, None, None)
+}
+
+pub fn import_from_url_bytes(
+    state: &AppState,
+    image_url: &str,
+    page_url: Option<&str>,
+    title: Option<&str>,
+    notes: Option<&str>,
+    folder_id: Option<String>,
+    inline: Option<&[u8]>,
+    mime: Option<&str>,
+) -> Result<ImportResult, String> {
     let note = notes.map(|s| s.to_string()).or_else(|| {
         title.map(|t| {
             if let Some(p) = page_url {
@@ -347,17 +360,70 @@ pub fn import_from_url(
             }
         })
     });
-    import_remote_image(
-        state,
-        image_url,
-        ImportOpts {
-            folder_id,
-            source_url: page_url.or(Some(image_url)).map(|s| s.to_string()),
-            notes: note,
-            source_kind: "plugin".to_string(),
-            source_ref: None,
-        },
-    )
+    let opts = ImportOpts {
+        folder_id,
+        source_url: page_url.or(Some(image_url)).map(|s| s.to_string()),
+        notes: note,
+        source_kind: "plugin".to_string(),
+        source_ref: None,
+    };
+    if let Some(bytes) = inline.filter(|b| !b.is_empty()) {
+        return import_remote_bytes(state, image_url, bytes, mime, opts);
+    }
+    import_remote_image(state, image_url, opts)
+}
+
+fn ext_from_mime(mime: Option<&str>) -> Option<String> {
+    let m = mime.unwrap_or("").split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    match m.as_str() {
+        "image/jpeg" | "image/jpg" => Some("jpg".into()),
+        "image/png" => Some("png".into()),
+        "image/webp" => Some("webp".into()),
+        "image/gif" => Some("gif".into()),
+        "image/bmp" => Some("bmp".into()),
+        _ => None,
+    }
+}
+
+fn import_remote_bytes(
+    state: &AppState,
+    hint_url: &str,
+    bytes: &[u8],
+    mime: Option<&str>,
+    opts: ImportOpts,
+) -> Result<ImportResult, String> {
+    let run_id = Uuid::new_v4().to_string();
+    log::info!(
+        target: "inspirex",
+        "import_bytes_start run_id={} bytes={} mime={:?} url={}",
+        run_id,
+        bytes.len(),
+        mime,
+        hint_url
+    );
+    state.ensure_dirs().map_err(|e| e.to_string())?;
+    let ext = ext_from_mime(mime).unwrap_or_else(|| guess_ext_from_url(hint_url));
+    let tmp = state
+        .library_path
+        .join("inbox")
+        .join(format!("{run_id}.{ext}"));
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    let result = import_paths_with(state, vec![tmp.display().to_string()], opts);
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+pub fn decode_image_base64(raw: &str) -> Result<Vec<u8>, String> {
+    let s = raw
+        .split(',')
+        .next_back()
+        .unwrap_or(raw)
+        .trim();
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+        .or_else(|_| {
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, s)
+        })
+        .map_err(|e| format!("base64 解码失败: {e}"))
 }
 
 /// 下载远程图片后走同一入库管道（订阅 / 插件 / 生图落盘前也可复用）。
@@ -405,6 +471,7 @@ fn guess_ext_from_url(url: &str) -> String {
 pub fn download_file(url: &str, dest: &Path) -> Result<(), String> {
     let resp = ureq::get(url)
         .set("User-Agent", "InspireX/0.1")
+        .timeout(std::time::Duration::from_secs(15))
         .call()
         .map_err(|e| format!("下载失败: {e}"))?;
     let mut reader = resp.into_reader();
@@ -732,5 +799,36 @@ mod tests {
         let assets = db::list_assets(&conn, None, 10).unwrap();
         assert!(assets[0].thumb_path.is_some(), "expected keyframe thumb");
         assert_eq!(assets[0].clip_status, "mock");
+    }
+
+    #[test]
+    fn import_inline_bytes_skips_network() {
+        let dir = tempdir().unwrap();
+        let state = AppState::for_test(dir.path().join("Library"));
+        state.ensure_dirs().unwrap();
+        let mut img = RgbImage::new(16, 16);
+        for p in img.pixels_mut() {
+            *p = Rgb([10, 20, 30]);
+        }
+        let png_path = dir.path().join("x.png");
+        img.save(&png_path).unwrap();
+        let bytes = std::fs::read(&png_path).unwrap();
+        let b64 = decode_image_base64(&base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &bytes,
+        ))
+        .unwrap();
+        let result = import_from_url_bytes(
+            &state,
+            "https://i.pinimg.com/736x/demo.png",
+            Some("https://www.pinterest.com/board/"),
+            Some("pin"),
+            None,
+            None,
+            Some(&b64),
+            Some("image/png"),
+        )
+        .unwrap();
+        assert_eq!(result.imported, 1, "{result:?}");
     }
 }

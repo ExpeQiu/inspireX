@@ -12,13 +12,13 @@
 
 | 项 | 选择 |
 |----|------|
-| 主界面 | 浏览器 `http://127.0.0.1:1420` |
+| 主界面 | 浏览器 `http://127.0.0.1:1420`（子页面：`/library` `/volumes` `/local` `/hub` `/subscribe` `/generate` `/folders/:id`） |
 | 后端 | 本机 Tauri 进程常驻；默认隐藏窗口 |
 | RPC | 全部 `invoke` 走 `POST /v1/invoke`（`127.0.0.1:18765`） |
 | 插件采集 | 仍用 `/v1/import` 等 REST + Bearer |
 | 封装 App | 日后 `INSPIREX_SHOW_WINDOW=true`，前端可继续用 IPC |
 
-拖出到其它 App、系统文件对话框仍依赖原生窗口；浏览器里改粘贴绝对路径。
+拖出到其它 App 仍依赖原生窗口。选文件夹用应用内浏览器弹窗（`list_picker_dir`）；选文件在浏览器里仍可粘贴绝对路径。
 
 ## 后果
 

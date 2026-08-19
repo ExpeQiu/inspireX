@@ -235,6 +235,7 @@ fn fetch_text(url: &str) -> Result<String, String> {
     }
     let resp = ureq::get(url)
         .set("User-Agent", "InspireX/0.1")
+        .timeout(Duration::from_secs(15))
         .call()
         .map_err(|e| format!("拉取 feed 失败: {e}"))?;
     resp.into_string()
@@ -398,7 +399,25 @@ fn unescape(s: &str) -> String {
         .replace("&#39;", "'")
 }
 
+fn login_wall_reason(url: &str) -> Option<&'static str> {
+    let l = url.to_ascii_lowercase();
+    let host = l
+        .strip_prefix("https://")
+        .or_else(|| l.strip_prefix("http://"))
+        .unwrap_or(&l);
+    let host = host.split('/').next().unwrap_or(host);
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    if host == "pinterest.com" || host.ends_with(".pinterest.com") || host == "pin.it" {
+        Some("Pinterest 为登录墙，订阅源无法无人值守抓取。请用浏览器插件在已打开的页面上「本页多选保存」。")
+    } else {
+        None
+    }
+}
+
 fn fetch_html_images(page_url: &str) -> Result<Vec<RemoteImage>, String> {
+    if let Some(reason) = login_wall_reason(page_url) {
+        return Err(reason.into());
+    }
     if page_url.starts_with("http://") || page_url.starts_with("https://") {
         if !robots_allows(page_url) {
             return Err("robots.txt 禁止抓取该路径".into());
@@ -945,6 +964,30 @@ mod tests {
                 .unwrap_or("")
                 .contains("robots.txt"),
             "{got:?}"
+        );
+    }
+
+    #[test]
+    fn html_page_rejects_pinterest_without_network() {
+        let dir = tempdir().unwrap();
+        let state = AppState::for_test(dir.path().join("Library"));
+        state.ensure_dirs().unwrap();
+        let src = create_source(
+            &state,
+            CreateSource {
+                name: "F1".into(),
+                kind: "html_page".into(),
+                url: "https://www.pinterest.com/qiubin2021/跑車/f1/".into(),
+                interval_min: Some(60),
+                folder_id: None,
+            },
+        )
+        .unwrap();
+        let result = pull_source(&state, &src.id).unwrap();
+        assert_eq!(result.imported, 0, "{result:?}");
+        assert!(
+            result.errors.iter().any(|e| e.contains("登录墙")),
+            "{result:?}"
         );
     }
 }

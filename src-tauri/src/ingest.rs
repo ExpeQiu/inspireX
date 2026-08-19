@@ -504,13 +504,26 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                         ));
                         continue;
                     }
-                    match import_from_url(
+                    let inline = req
+                        .image_base64
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                        .and_then(|s| match crate::library::decode_image_base64(s) {
+                            Ok(b) => Some(b),
+                            Err(e) => {
+                                log::warn!(target: "inspirex", "ingest_b64_fail err={}", e);
+                                None
+                            }
+                        });
+                    match crate::library::import_from_url_bytes(
                         &state,
                         &req.image_url,
                         req.page_url.as_deref(),
                         req.title.as_deref(),
                         req.notes.as_deref(),
                         req.folder_id,
+                        inline.as_deref(),
+                        req.mime.as_deref(),
                     ) {
                         Ok(result) => {
                             let payload = serde_json::json!({

@@ -1,0 +1,178 @@
+{
+  "$schema": "https://compo.dev/schemas/cli-agent-manifest/v1",
+  "name": "inspirex",
+  "version": "0.1.0",
+  "cli": {
+    "command": "inspirex",
+    "install": "pip install -e ./cli",
+    "verify": "./scripts/verify.sh"
+  },
+  "commands": [
+    {
+      "name": "status",
+      "description": "健康检查 + 库信息",
+      "cli_template": "inspirex -q --format json status",
+      "agent_safe": true,
+      "interactive": false,
+      "timeout_sec": 15,
+      "output": { "format": "json", "schema_ref": "#/definitions/envelope" },
+      "exit_codes": { "0": "success", "1": "backend_down" }
+    },
+    {
+      "name": "config-check",
+      "description": "检查配置；后端未启动不失败",
+      "cli_template": "inspirex -q --format json config check",
+      "agent_safe": true,
+      "interactive": false,
+      "timeout_sec": 15,
+      "exit_codes": { "0": "success" }
+    },
+    {
+      "name": "library-info",
+      "description": "库路径、素材数、CLIP/生图模式",
+      "cli_template": "inspirex -q --format json library info",
+      "agent_safe": true,
+      "interactive": false,
+      "timeout_sec": 15,
+      "exit_codes": { "0": "success", "1": "backend_down" }
+    },
+    {
+      "name": "asset-list",
+      "description": "列出素材",
+      "cli_template": "inspirex -q --format json asset list --limit {limit}",
+      "agent_safe": true,
+      "interactive": false,
+      "timeout_sec": 30,
+      "params": {
+        "limit": { "type": "integer", "default": 50, "minimum": 1, "maximum": 500 }
+      },
+      "exit_codes": { "0": "success", "1": "backend_down" }
+    },
+    {
+      "name": "asset-search",
+      "description": "FTS / 标签 / 颜色 / CLIP 检索",
+      "cli_template": "inspirex -q --format json asset search {text} --limit {limit}",
+      "agent_safe": true,
+      "interactive": false,
+      "timeout_sec": 60,
+      "params": {
+        "text": { "type": "string", "description": "检索词" },
+        "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 200 }
+      },
+      "exit_codes": { "0": "success", "2": "no_data", "1": "backend_down" }
+    },
+    {
+      "name": "folder-list",
+      "description": "列出文件夹",
+      "cli_template": "inspirex -q --format json folder list",
+      "agent_safe": true,
+      "interactive": false,
+      "timeout_sec": 15,
+      "exit_codes": { "0": "success" }
+    },
+    {
+      "name": "tag-list",
+      "description": "列出标签",
+      "cli_template": "inspirex -q --format json tag list",
+      "agent_safe": true,
+      "interactive": false,
+      "timeout_sec": 15,
+      "exit_codes": { "0": "success" }
+    },
+    {
+      "name": "source-list",
+      "description": "列出订阅源",
+      "cli_template": "inspirex -q --format json source list",
+      "agent_safe": true,
+      "interactive": false,
+      "timeout_sec": 15,
+      "exit_codes": { "0": "success" }
+    },
+    {
+      "name": "hub-status",
+      "description": "中转站绑定状态",
+      "cli_template": "inspirex -q --format json hub status",
+      "agent_safe": true,
+      "interactive": false,
+      "timeout_sec": 15,
+      "exit_codes": { "0": "success" }
+    },
+    {
+      "name": "asset-list-demo",
+      "description": "离线夹具列出素材（verify / CI）",
+      "cli_template": "inspirex --demo -q --format json asset list",
+      "agent_safe": true,
+      "interactive": false,
+      "timeout_sec": 10,
+      "exit_codes": { "0": "success" }
+    },
+    {
+      "name": "asset-import",
+      "description": "本机路径入库",
+      "cli_template": "inspirex --format json asset import {paths}",
+      "agent_safe": "write_with_confirm",
+      "interactive": false,
+      "timeout_sec": 120,
+      "params": {
+        "paths": { "type": "string", "description": "一个或多个文件路径" }
+      },
+      "exit_codes": { "0": "success", "1": "error", "3": "import_failed" }
+    },
+    {
+      "name": "asset-import-url",
+      "description": "图片 URL 入库",
+      "cli_template": "inspirex --format json asset import-url {image_url}",
+      "agent_safe": "write_with_confirm",
+      "interactive": false,
+      "timeout_sec": 120,
+      "human_required": true,
+      "reason": "写入素材库",
+      "exit_codes": { "0": "success", "3": "import_failed" }
+    },
+    {
+      "name": "folder-create",
+      "description": "新建文件夹",
+      "cli_template": "inspirex --format json folder create {name}",
+      "agent_safe": "write_with_confirm",
+      "interactive": false,
+      "timeout_sec": 15,
+      "reason": "写库",
+      "exit_codes": { "0": "success" }
+    },
+    {
+      "name": "tag-create",
+      "description": "新建标签",
+      "cli_template": "inspirex --format json tag create {name}",
+      "agent_safe": "write_with_confirm",
+      "interactive": false,
+      "timeout_sec": 15,
+      "reason": "写库",
+      "exit_codes": { "0": "success" }
+    },
+    {
+      "name": "source-pull",
+      "description": "立即拉取订阅源并可能入库",
+      "cli_template": "inspirex --format json source pull {source_id}",
+      "agent_safe": "write_with_confirm",
+      "interactive": false,
+      "timeout_sec": 120,
+      "reason": "拉取并写入素材库",
+      "exit_codes": { "0": "success", "3": "scrape_failed" }
+    }
+  ],
+  "definitions": {
+    "envelope": {
+      "type": "object",
+      "required": ["module", "data_source", "items"],
+      "properties": {
+        "module": { "type": "string" },
+        "version": { "type": "string" },
+        "data_source": { "enum": ["live", "demo", "cache"] },
+        "fetched_at": { "type": "string" },
+        "count": { "type": "integer" },
+        "items": { "type": "array" },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

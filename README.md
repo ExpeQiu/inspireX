@@ -13,6 +13,20 @@ cp .env.example .env
 ./scripts/stop.sh
 ```
 
+主界面按侧栏拆成子路径，可收藏、新开标签：
+
+| 地址 | 页面 |
+|------|------|
+| `/` 或 `/volumes` | 外置卷 |
+| `/library` | 全部素材 |
+| `/local` | 本地库 |
+| `/hub` | 中转站 |
+| `/subscribe` | 订阅源 |
+| `/generate` | AI 生图 |
+| `/folders/<id>` | 灵犀分类 |
+
+浏览目录会带 `?path=`。
+
 默认库目录：`~/InspireX/Library`（可用 `INSPIREX_LIBRARY_PATH` 覆盖）。
 
 > 若仓库在 Lexar 等外置卷：已通过 `.cargo/config.toml` 把 Rust `target` 指到本机 `~/.cache/inspirex-cargo-target`，避免 AppleDouble 污染构建。
@@ -51,6 +65,19 @@ IMAGE_GEN_MODEL=image-01
 ```
 
 无 Key 时自动回退占位图。Key 只进 `.env`，不要提交。生图需 [按量计费接口密钥](https://platform.minimaxi.com/user-center/basic-information/interface-key)。
+
+## CLI
+
+标准化命令 `inspirex`（模板 6，见 `ADR/007`）。全局选项在子命令前。
+
+```bash
+python3 -m venv cli/.venv && source cli/.venv/bin/activate
+pip install -e "./cli[dev]"
+inspirex --demo --format json asset list
+inspirex --demo --format json asset search 海报
+```
+
+Live 需本机后端已启动。说明见 `cli/README.md`、`cli/SKILL.md`。
 
 ## 浏览器插件
 

@@ -15,6 +15,14 @@ dist-ssr
 .env
 .run/
 
+# Python CLI
+cli/.venv/
+cli/**/__pycache__/
+cli/**/*.egg-info/
+.pytest_cache/
+__pycache__/
+*.egg-info/
+
 # Rust / Tauri
 src-tauri/target
 

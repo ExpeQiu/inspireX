@@ -151,6 +151,8 @@ input {
   padding: 10px 12px;
   border-radius: 8px;
   cursor: pointer;
+  text-decoration: none;
+  box-sizing: border-box;
 }
 
 .nav-item:hover,
@@ -281,6 +283,28 @@ input {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
 }
 
+button.finder-tag-chip {
+  cursor: pointer;
+  font: inherit;
+  padding: 4px 10px 4px 8px;
+  border-radius: 999px;
+}
+
+.finder-tag-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.finder-tag-add input {
+  flex: 1;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 8px 12px;
+  outline: none;
+}
+
 .linkish {
   border: 0;
   background: transparent;
@@ -301,6 +325,7 @@ input {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: auto;
 }
 
 .toolbar {
@@ -392,17 +417,139 @@ button.primary {
   outline: none;
 }
 
+.folder-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  border: 0;
+  background: color-mix(in srgb, var(--ink) 28%, transparent);
+  backdrop-filter: blur(4px);
+}
+
+.folder-picker {
+  width: min(560px, 94vw);
+  height: min(640px, 86vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 18px 50px color-mix(in srgb, var(--ink) 18%, transparent);
+}
+
+.folder-picker-head {
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.folder-picker-head h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.folder-picker-path {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.folder-picker-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.folder-picker-shortcuts button {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+.folder-picker-shortcuts button.active,
+.folder-picker-shortcuts button:hover {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+
+.folder-picker-list {
+  flex: 1;
+  overflow: auto;
+  padding: 8px;
+}
+
+.folder-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.folder-picker-item:hover {
+  background: var(--surface-2);
+}
+
+.folder-picker-up {
+  color: var(--muted);
+}
+
+.folder-picker-icon {
+  flex: 0 0 auto;
+}
+
+.folder-picker-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-picker-hint,
+.folder-picker-error {
+  margin: 24px 16px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.folder-picker-error {
+  color: var(--danger);
+}
+
+.folder-picker-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+
 .grid {
   padding: 16px 20px 28px;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 14px;
-  align-content: start;
-  overflow: auto;
+  column-width: 180px;
+  column-gap: 14px;
+  column-fill: balance;
 }
 
 .empty {
-  grid-column: 1 / -1;
+  column-span: all;
   padding: 80px 20px;
   text-align: center;
   color: var(--muted);
@@ -441,6 +588,7 @@ button.primary {
   padding: 2px 4px;
   cursor: pointer;
   border-radius: 4px;
+  text-decoration: none;
 }
 
 .crumb:hover {
@@ -455,6 +603,7 @@ button.primary {
 .folder-thumb {
   display: grid;
   place-items: center;
+  aspect-ratio: 4 / 3;
   color: var(--muted);
   font-family: "Avenir Next", "Segoe UI", sans-serif;
   letter-spacing: 0.08em;
@@ -465,8 +614,10 @@ button.primary {
 
 .video-thumb {
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: auto;
+  display: block;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
   background: #1c1a17;
 }
 
@@ -499,9 +650,13 @@ button.primary {
   cursor: pointer;
   text-align: left;
   transition: transform 160ms ease, border-color 160ms ease;
-  content-visibility: auto;
-  contain-intrinsic-size: 200px;
   position: relative;
+  display: block;
+  width: 100%;
+  margin-bottom: 14px;
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  page-break-inside: avoid;
 }
 
 .card:hover {
@@ -528,19 +683,19 @@ button.primary {
 
 .card-check {
   position: absolute;
-  top: 8px;
-  left: 8px;
+  top: 6px;
+  left: 6px;
   z-index: 2;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
   border: 1px solid var(--line);
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   color: var(--accent);
   padding: 0;
   display: grid;
   place-items: center;
-  font-size: 14px;
+  font-size: 11px;
   line-height: 1;
 }
 
@@ -632,26 +787,41 @@ button.danger {
 }
 
 .thumb {
-  aspect-ratio: 1;
   overflow: hidden;
   background: var(--surface-2);
 }
 
+.thumb:not(.thumb-ready):not(.folder-thumb) {
+  aspect-ratio: 3 / 4;
+}
+
+.thumb.folder-thumb {
+  aspect-ratio: 4 / 3;
+}
+
 .thumb-inner {
   width: 100%;
-  height: 100%;
+  line-height: 0;
 }
 
 .thumb img,
-.thumb-inner img,
-.detail-preview img {
+.thumb-inner img {
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: auto;
   display: block;
   user-select: none;
   -webkit-user-drag: none;
   pointer-events: none;
+}
+
+.detail-preview img {
+  width: 100%;
+  height: auto;
+  max-height: 48vh;
+  object-fit: contain;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .card {
@@ -660,7 +830,7 @@ button.danger {
 }
 
 .load-more {
-  grid-column: 1 / -1;
+  column-span: all;
   display: flex;
   justify-content: center;
   padding: 12px 0 4px;
@@ -677,6 +847,34 @@ button.danger {
   padding: 8px 10px 10px;
   font-family: "Avenir Next", "Segoe UI", sans-serif;
   font-size: 12px;
+}
+
+.card:not(.folder-card) .card-meta {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 20px 10px 8px;
+  color: #fff;
+  background: linear-gradient(
+    transparent,
+    color-mix(in srgb, var(--ink) 78%, transparent)
+  );
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+}
+
+.card:not(.folder-card) .card-meta .badge {
+  color: color-mix(in srgb, #fff 72%, transparent);
+}
+
+.card:not(.folder-card):hover .card-meta,
+.card-active:not(.folder-card) .card-meta,
+.card-selected:not(.folder-card) .card-meta {
+  opacity: 1;
 }
 
 .name {
@@ -700,7 +898,8 @@ button.danger {
 .detail-preview {
   border-radius: 12px;
   overflow: hidden;
-  aspect-ratio: 1;
+  background: #111;
+  max-height: 48vh;
 }
 
 .detail .close {
@@ -753,6 +952,8 @@ dd {
 }
 
 .panel {
+  flex: 1;
+  min-height: 0;
   padding: 16px 20px 28px;
   overflow: auto;
   display: flex;
@@ -787,6 +988,66 @@ dd {
   padding: 12px;
 }
 
+.gen-detail {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px;
+}
+
+.gen-detail h2 {
+  font-size: 16px;
+  margin: 0;
+  word-break: break-all;
+}
+
+.gen-detail dd {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.gen-detail-preview {
+  flex: 1 1 auto;
+  min-height: 220px;
+  max-height: min(58vh, 560px);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #111;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.gen-detail-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
+}
+
+.gen-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  padding-bottom: 2px;
+}
+
+.gen-strip-card {
+  width: 72px;
+  min-width: 72px;
+  margin-bottom: 0;
+}
+
+.gen-detail .detail-actions {
+  margin-top: 4px;
+}
+
 .result-head {
   display: flex;
   align-items: center;
@@ -800,7 +1061,6 @@ dd {
 
 .result-grid {
   padding: 4px 0 8px;
-  flex: 1;
 }
 
 .source-card-active {

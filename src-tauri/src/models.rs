@@ -64,6 +64,11 @@ pub struct IngestImportRequest {
     pub title: Option<String>,
     pub notes: Option<String>,
     pub folder_id: Option<String>,
+    /// 插件在浏览器里下好的图，避免本机直连 CDN 超时
+    #[serde(default)]
+    pub image_base64: Option<String>,
+    #[serde(default)]
+    pub mime: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

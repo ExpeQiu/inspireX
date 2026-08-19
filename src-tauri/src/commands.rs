@@ -218,6 +218,14 @@ pub async fn list_browse_dir(
 }
 
 #[tauri::command]
+pub fn list_picker_dir(
+    path: Option<String>,
+    kind: Option<String>,
+) -> Result<ExternalListing, String> {
+    rpc::list_picker_dir(path, kind)
+}
+
+#[tauri::command]
 pub fn list_finder_tags() -> Vec<FinderTag> {
     rpc::list_finder_tags()
 }

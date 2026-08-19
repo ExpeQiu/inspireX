@@ -1,0 +1,6 @@
+"""退出码（对齐 15CLI/CLI标准.md）。"""
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_NO_DATA = 2
+EXIT_SCRAPE_FAIL = 3

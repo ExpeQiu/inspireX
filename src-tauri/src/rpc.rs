@@ -4,13 +4,14 @@
 use crate::browse::{
     add_index_root, add_local_index_root, copy_into_hub, ensure_readable, ensure_under_kind,
     hub_status, is_kind_virtual_root, item_from_path, list_browse_for_kind, list_index_roots,
-    list_local_index_roots, matching_index_root, parse_browse_kind, remove_index_root,
-    remove_local_index_root, root_for_kind, set_hub_root, virtual_root_for, ExternalItem,
-    ExternalKind, ExternalListing, HubCopyResult, HubStatus, IndexRoot, LocalIndexRoot,
+    list_local_index_roots, list_picker_dir as browse_list_picker_dir, matching_index_root,
+    parse_browse_kind, remove_index_root, remove_local_index_root, root_for_kind, set_hub_root,
+    virtual_root_for, ExternalItem, ExternalKind, ExternalListing, HubCopyResult, HubStatus,
+    IndexRoot, LocalIndexRoot,
 };
 use crate::db;
 use crate::finder_tags::{self, FinderTag, FinderTagValue};
-use crate::library::{asset_abs_path, delete_asset, import_from_url, import_paths, library_info, AppState};
+use crate::library::{asset_abs_path, delete_asset, import_paths, library_info, AppState};
 use crate::models::{
     Asset, CreateSource, Folder, GenerateRequest, GenJob, IngestImportRequest, SearchQuery,
     Source, Tag, UpdateAssetMeta,
@@ -154,6 +155,8 @@ impl Default for IngestImportRequest {
             title: None,
             notes: None,
             folder_id: None,
+            image_base64: None,
+            mime: None,
         }
     }
 }
@@ -566,13 +569,21 @@ pub fn search_assets(state: &AppState, query: SearchQuery) -> Result<Vec<Asset>,
 }
 
 pub fn import_url(state: &AppState, req: IngestImportRequest) -> Result<crate::models::ImportResult, String> {
-    import_from_url(
+    let inline = req
+        .image_base64
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(crate::library::decode_image_base64)
+        .transpose()?;
+    crate::library::import_from_url_bytes(
         state,
         &req.image_url,
         req.page_url.as_deref(),
         req.title.as_deref(),
         req.notes.as_deref(),
         req.folder_id,
+        inline.as_deref(),
+        req.mime.as_deref(),
     )
 }
 
@@ -634,6 +645,12 @@ pub fn list_browse_dir(
     let kind = parse_browse_kind(kind.as_deref()).to_string();
     let target = path.filter(|p| !p.trim().is_empty()).map(PathBuf::from);
     list_browse_for_kind(target, &kind, limit.unwrap_or(72), offset.unwrap_or(0))
+}
+
+pub fn list_picker_dir(path: Option<String>, kind: Option<String>) -> Result<ExternalListing, String> {
+    let kind = parse_browse_kind(kind.as_deref());
+    let target = path.filter(|p| !p.trim().is_empty()).map(PathBuf::from);
+    browse_list_picker_dir(target.as_deref(), kind)
 }
 
 pub fn list_finder_tags() -> Vec<FinderTag> {
@@ -892,6 +909,10 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
             let a: BrowseDirArgs = parse(&args)?;
             json_ok(list_browse_dir(a.path, a.limit, a.offset, a.kind)?)
         }
+        "list_picker_dir" => {
+            let a: BrowseDirArgs = parse(&args)?;
+            json_ok(list_picker_dir(a.path, a.kind)?)
+        }
         "list_finder_tags" => json_ok(list_finder_tags()),
         "list_browse_by_tag" => {
             let a: BrowseByTagArgs = parse(&args)?;
@@ -974,6 +995,16 @@ mod tests {
 
         let err = dispatch(&state, "no_such_cmd", json!({})).unwrap_err();
         assert!(err.contains("未知命令"), "{err}");
+    }
+
+    #[test]
+    fn dispatch_list_picker_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(dir.path().to_path_buf());
+        let listing = dispatch(&state, "list_picker_dir", json!({"kind": "local"})).unwrap();
+        assert!(listing["path"].as_str().unwrap().len() > 1);
+        assert!(listing["folders"].is_array());
+        assert!(listing["media"].as_array().unwrap().is_empty());
     }
 
     #[test]
