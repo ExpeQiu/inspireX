@@ -4,8 +4,9 @@
 use crate::pipeline::{guess_mime, is_media, is_video};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +59,10 @@ const LOCAL_SKIP_NAMES: &[&str] = &[
     "Sites",
     "InspireX",
 ];
+
+const ALL_LINKED_SCAN_CAP: usize = 2000;
+const WALK_SKIP_DIR_NAMES: &[&str] = &["InspireX", "node_modules", ".git"];
+const ALL_LINKED_VIRTUAL: &str = "inspirex://all";
 
 pub fn parse_browse_kind(kind: Option<&str>) -> &'static str {
     match kind.map(|s| s.trim()) {
@@ -462,6 +467,135 @@ pub fn list_browse_for_kind(
     };
     let safe = ensure_under_kind(&target, kind)?;
     list_external_dir(&safe, media_limit, media_offset, &root)
+}
+
+/// 外置卷 / 本地库绑定根 + 中转站（若已绑定）。
+pub fn linked_source_roots() -> Vec<(&'static str, PathBuf)> {
+    let mut out = Vec::new();
+    for r in list_index_roots("volumes") {
+        out.push(("volumes", PathBuf::from(r.path)));
+    }
+    for r in list_index_roots("local") {
+        out.push(("local", PathBuf::from(r.path)));
+    }
+    let hub = default_hub_root();
+    if !hub.as_os_str().is_empty() {
+        out.push(("hub", hub));
+    }
+    out
+}
+
+fn should_skip_walk_dir(name: &str) -> bool {
+    is_hidden_name(name) || WALK_SKIP_DIR_NAMES.iter().any(|n| *n == name)
+}
+
+fn collect_media_under(root: &Path, cap: usize) -> Vec<ExternalItem> {
+    if cap == 0 || !root.exists() {
+        return Vec::new();
+    }
+    if is_photos_library(root) {
+        return list_photos_library(root, cap, 0, root)
+            .map(|l| l.media)
+            .unwrap_or_default();
+    }
+    let mut out = Vec::new();
+    let walker = WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            if should_skip_walk_dir(&name) {
+                return false;
+            }
+            if e.depth() > 0 {
+                if let Some(lib) = enclosing_photos_library(e.path()) {
+                    if lib != root && e.path() != lib.as_path() {
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+    for entry in walker.filter_map(|e| e.ok()) {
+        if out.len() >= cap {
+            break;
+        }
+        let p = entry.path();
+        if entry.file_type().is_dir() {
+            if is_photos_library(p) && p != root {
+                if let Ok(l) = list_photos_library(p, cap - out.len(), 0, p) {
+                    out.extend(l.media);
+                }
+            }
+            continue;
+        }
+        if let Some(item) = item_from_path(p) {
+            if matches!(item.kind, ExternalKind::Image | ExternalKind::Video) {
+                out.push(item);
+            }
+        }
+    }
+    out
+}
+
+/// 「全部素材」用：递归收集各来源链接图（不复制）。虚拟根本身只列索引目录，这里摊平媒体。
+pub fn list_all_linked_media(limit: usize, offset: usize) -> ExternalListing {
+    list_all_linked_media_from(linked_source_roots(), limit, offset)
+}
+
+fn list_all_linked_media_from(
+    roots: Vec<(&'static str, PathBuf)>,
+    limit: usize,
+    offset: usize,
+) -> ExternalListing {
+    let t0 = Instant::now();
+    let mut seen = HashSet::new();
+    let mut media = Vec::new();
+    for (kind, root) in &roots {
+        if !root.exists() {
+            continue;
+        }
+        let remaining = ALL_LINKED_SCAN_CAP.saturating_sub(media.len());
+        if remaining == 0 {
+            break;
+        }
+        let got = collect_media_under(root, remaining);
+        log::info!(
+            target: "inspirex",
+            "all_linked_scan kind={} root={} files={}",
+            kind,
+            root.display(),
+            got.len()
+        );
+        for item in got {
+            if seen.insert(item.path.clone()) {
+                media.push(item);
+            }
+        }
+    }
+    media.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    let total = media.len();
+    let truncated = offset + limit < total || total >= ALL_LINKED_SCAN_CAP;
+    let page: Vec<_> = media.into_iter().skip(offset).take(limit).collect();
+    log::info!(
+        target: "inspirex",
+        "all_linked_media roots={} total={} page={} offset={} truncated={} ms={}",
+        roots.len(),
+        total,
+        page.len(),
+        offset,
+        truncated,
+        t0.elapsed().as_millis()
+    );
+    ExternalListing {
+        root: ALL_LINKED_VIRTUAL.into(),
+        path: ALL_LINKED_VIRTUAL.into(),
+        parent: None,
+        folders: Vec::new(),
+        media: page,
+        truncated,
+        total_media: total,
+    }
 }
 
 /// 选文件夹弹窗的沙箱根：外置卷从 `/Volumes` 起，其余从家目录起。
@@ -1780,5 +1914,48 @@ mod tests {
         let home = picker_root_for("local");
         assert!(!home.as_os_str().is_empty());
         assert_eq!(picker_root_for("hub"), home);
+    }
+
+    #[test]
+    fn all_linked_media_flattens_nested_and_all_sources() {
+        let dir = tempdir().unwrap();
+        let local = dir.path().join("local-album");
+        fs::create_dir_all(local.join("nested")).unwrap();
+        fs::write(local.join("nested").join("deep.png"), b"x").unwrap();
+        fs::write(local.join("top.jpg"), b"x").unwrap();
+
+        let vol = dir.path().join("disk");
+        fs::create_dir(&vol).unwrap();
+        fs::write(vol.join("vol.png"), b"x").unwrap();
+
+        let hub = dir.path().join("cloud");
+        fs::create_dir(&hub).unwrap();
+        fs::write(hub.join("hub.png"), b"x").unwrap();
+
+        let nested = collect_media_under(&local, 100);
+        assert_eq!(
+            nested.len(),
+            2,
+            "{:?}",
+            nested.iter().map(|m| m.name.as_str()).collect::<Vec<_>>()
+        );
+
+        let listing = list_all_linked_media_from(
+            vec![
+                ("local", local),
+                ("volumes", vol),
+                ("hub", hub),
+            ],
+            72,
+            0,
+        );
+        let names: Vec<&str> = listing.media.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"deep.png"), "{names:?}");
+        assert!(names.contains(&"top.jpg"), "{names:?}");
+        assert!(names.contains(&"vol.png"), "{names:?}");
+        assert!(names.contains(&"hub.png"), "{names:?}");
+        assert_eq!(listing.total_media, 4, "{names:?}");
+        assert!(!listing.truncated);
+        assert!(listing.folders.is_empty());
     }
 }

@@ -44,8 +44,10 @@ pub fn spawn_subscribe_poller(state: Arc<AppState>) {
 
 pub fn create_source(state: &AppState, req: CreateSource) -> Result<Source, String> {
     let kind = req.kind.trim().to_ascii_lowercase();
-    if kind != "rss" && kind != "url_list" && kind != "html_page" {
-        return Err(format!("不支持的源类型: {kind}（rss | url_list | html_page）"));
+    if kind != "rss" && kind != "url_list" && kind != "html_page" && kind != "plugin_watch" {
+        return Err(format!(
+            "不支持的源类型: {kind}（rss | url_list | html_page | plugin_watch）"
+        ));
     }
     let url = req.url.trim().to_string();
     if url.is_empty() {
@@ -96,6 +98,9 @@ fn pull_due_sources(state: &AppState) -> Result<usize, String> {
     let mut n = 0usize;
     for src in sources {
         if !src.enabled {
+            continue;
+        }
+        if src.kind == "plugin_watch" {
             continue;
         }
         let due = match &src.last_run_at {
@@ -219,11 +224,33 @@ fn collect_source_images(source: &Source) -> Result<Vec<RemoteImage>, String> {
     match source.kind.as_str() {
         "url_list" => Ok(parse_url_list(&source.url)),
         "html_page" => fetch_html_images(&source.url),
+        "plugin_watch" => Err(
+            "盯梢源由浏览器插件定时扫描。请在 Chrome 中打开并登录该页，保持标签不关。"
+                .into(),
+        ),
         _ => {
             let xml = fetch_text(&source.url)?;
             Ok(parse_feed(&xml))
         }
     }
+}
+
+pub fn report_source_run(state: &AppState, source_id: &str, summary: &str) -> Result<(), String> {
+    let conn = state.open_db().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let note = if summary.trim().is_empty() {
+        None
+    } else {
+        Some(summary.chars().take(500).collect::<String>())
+    };
+    db::update_source_run(&conn, source_id, &now, note.as_deref()).map_err(|e| e.to_string())?;
+    log::info!(
+        target: "inspirex",
+        "source_watch_run source_id={} summary={}",
+        source_id,
+        summary
+    );
+    Ok(())
 }
 
 fn fetch_text(url: &str) -> Result<String, String> {
@@ -989,5 +1016,39 @@ mod tests {
             result.errors.iter().any(|e| e.contains("登录墙")),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn plugin_watch_create_and_rust_does_not_crawl() {
+        let dir = tempdir().unwrap();
+        let state = AppState::for_test(dir.path().join("Library"));
+        state.ensure_dirs().unwrap();
+        let src = create_source(
+            &state,
+            CreateSource {
+                name: "F1 盯梢".into(),
+                kind: "plugin_watch".into(),
+                url: "https://www.pinterest.com/qiubin2021/跑車/f1/".into(),
+                interval_min: Some(60),
+                folder_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(src.kind, "plugin_watch");
+        let result = pull_source(&state, &src.id).unwrap();
+        assert_eq!(result.imported, 0, "{result:?}");
+        assert!(
+            result.errors.iter().any(|e| e.contains("插件")),
+            "{result:?}"
+        );
+        report_source_run(&state, &src.id, "入库 2 · 跳过 10").unwrap();
+        let conn = state.open_db().unwrap();
+        let got = db::list_sources(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == src.id)
+            .unwrap();
+        assert!(got.last_error.as_deref().unwrap_or("").contains("入库 2"));
+        assert!(got.last_run_at.is_some());
     }
 }

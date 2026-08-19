@@ -33,3 +33,44 @@ document.getElementById("pick").onclick = async () => {
     window.close();
   });
 };
+
+const watchBtn = document.getElementById("watch");
+const watchHint = document.getElementById("watchHint");
+
+async function refreshWatchUi() {
+  chrome.runtime.sendMessage({ type: "inspirex-watch-restore" });
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.url || !tab.url.startsWith("http")) {
+    watchBtn.disabled = true;
+    watchHint.textContent = "请在普通网页上开启盯梢。";
+    return;
+  }
+  chrome.runtime.sendMessage({ type: "inspirex-watch-status", tabUrl: tab.url }, (resp) => {
+    if (!resp || !resp.ok) {
+      watchHint.textContent = (resp && resp.error) || "无法读取盯梢状态（灵犀需先启动）";
+      return;
+    }
+    watchBtn.textContent = resp.watching ? "停止盯梢" : "盯梢此页";
+    const last = resp.source && (resp.source.lastError || resp.source.last_error);
+    const when = resp.source && (resp.source.lastRunAt || resp.source.last_run_at);
+    watchHint.textContent = resp.watching
+      ? "每 60 分钟扫描本页（需保持标签打开）" +
+        (last ? " · 上次 " + last : "") +
+        (when ? " · " + new Date(when).toLocaleString() : "")
+      : "盯梢后每 60 分钟自动入库新图；关标签则跳过该次。";
+  });
+}
+
+watchBtn.onclick = async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  chrome.runtime.sendMessage({ type: "inspirex-watch-toggle", tab }, (resp) => {
+    if (!resp || !resp.ok) {
+      status.textContent = (resp && resp.error) || "盯梢失败，请先启动灵犀";
+      return;
+    }
+    status.textContent = resp.watching ? "已开始盯梢，正在扫描本页…" : "已停止盯梢";
+    refreshWatchUi();
+  });
+};
+
+refreshWatchUi();

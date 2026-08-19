@@ -524,6 +524,8 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                         req.folder_id,
                         inline.as_deref(),
                         req.mime.as_deref(),
+                        Some("plugin"),
+                        req.source_ref.as_deref(),
                     ) {
                         Ok(result) => {
                             let payload = serde_json::json!({

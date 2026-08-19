@@ -616,7 +616,7 @@ button.primary {
   width: 100%;
   height: auto;
   display: block;
-  aspect-ratio: 16 / 9;
+  max-height: 48vh;
   object-fit: contain;
   background: #1c1a17;
 }
@@ -802,6 +802,26 @@ button.danger {
 .thumb-inner {
   width: 100%;
   line-height: 0;
+  position: relative;
+}
+
+.thumb-play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(20, 18, 16, 0.72);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  letter-spacing: -0.2em;
+  padding-left: 3px;
+  pointer-events: none;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.28);
 }
 
 .thumb img,

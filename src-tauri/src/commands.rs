@@ -246,6 +246,17 @@ pub async fn list_browse_by_tag(
 }
 
 #[tauri::command]
+pub async fn list_all_linked_media(
+    tag: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<ExternalListing, String> {
+    tauri::async_runtime::spawn_blocking(move || rpc::list_all_linked_media(tag, limit, offset))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub fn get_finder_tags(path: String) -> Result<Vec<FinderTagValue>, String> {
     rpc::get_finder_tags(path)
 }
@@ -331,6 +342,15 @@ pub async fn import_gen_job(
     tauri::async_runtime::spawn_blocking(move || rpc::import_gen_job(&state, job_id, folder_id))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn report_source_run(
+    state: State<'_, Arc<AppState>>,
+    source_id: String,
+    summary: String,
+) -> Result<(), String> {
+    crate::subscribe::report_source_run(&state, &source_id, &summary)
 }
 
 #[tauri::command]

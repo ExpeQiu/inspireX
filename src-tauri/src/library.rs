@@ -338,7 +338,7 @@ pub fn import_from_url(
     notes: Option<&str>,
     folder_id: Option<String>,
 ) -> Result<ImportResult, String> {
-    import_from_url_bytes(state, image_url, page_url, title, notes, folder_id, None, None)
+    import_from_url_bytes(state, image_url, page_url, title, notes, folder_id, None, None, None, None)
 }
 
 pub fn import_from_url_bytes(
@@ -350,6 +350,8 @@ pub fn import_from_url_bytes(
     folder_id: Option<String>,
     inline: Option<&[u8]>,
     mime: Option<&str>,
+    source_kind: Option<&str>,
+    source_ref: Option<&str>,
 ) -> Result<ImportResult, String> {
     let note = notes.map(|s| s.to_string()).or_else(|| {
         title.map(|t| {
@@ -364,8 +366,15 @@ pub fn import_from_url_bytes(
         folder_id,
         source_url: page_url.or(Some(image_url)).map(|s| s.to_string()),
         notes: note,
-        source_kind: "plugin".to_string(),
-        source_ref: None,
+        source_kind: source_kind
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("plugin")
+            .to_string(),
+        source_ref: source_ref
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
     };
     if let Some(bytes) = inline.filter(|b| !b.is_empty()) {
         return import_remote_bytes(state, image_url, bytes, mime, opts);
@@ -827,6 +836,8 @@ mod tests {
             None,
             Some(&b64),
             Some("image/png"),
+            Some("plugin"),
+            None,
         )
         .unwrap();
         assert_eq!(result.imported, 1, "{result:?}");

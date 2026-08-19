@@ -69,6 +69,8 @@ pub struct IngestImportRequest {
     pub image_base64: Option<String>,
     #[serde(default)]
     pub mime: Option<String>,
+    #[serde(default)]
+    pub source_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,7 +152,7 @@ pub struct DeleteAssetResult {
 pub struct Source {
     pub id: String,
     pub name: String,
-    /// rss | url_list | html_page
+    /// rss | url_list | html_page | plugin_watch
     pub kind: String,
     pub url: String,
     pub interval_min: i64,

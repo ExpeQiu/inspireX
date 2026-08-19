@@ -3,11 +3,11 @@
 
 use crate::browse::{
     add_index_root, add_local_index_root, copy_into_hub, ensure_readable, ensure_under_kind,
-    hub_status, is_kind_virtual_root, item_from_path, list_browse_for_kind, list_index_roots,
-    list_local_index_roots, list_picker_dir as browse_list_picker_dir, matching_index_root,
-    parse_browse_kind, remove_index_root, remove_local_index_root, root_for_kind, set_hub_root,
-    virtual_root_for, ExternalItem, ExternalKind, ExternalListing, HubCopyResult, HubStatus,
-    IndexRoot, LocalIndexRoot,
+    hub_status, is_kind_virtual_root, item_from_path, linked_source_roots, list_browse_for_kind,
+    list_index_roots, list_local_index_roots, list_picker_dir as browse_list_picker_dir,
+    matching_index_root, parse_browse_kind, remove_index_root, remove_local_index_root,
+    root_for_kind, set_hub_root, virtual_root_for, ExternalItem, ExternalKind, ExternalListing,
+    HubCopyResult, HubStatus, IndexRoot, LocalIndexRoot,
 };
 use crate::db;
 use crate::finder_tags::{self, FinderTag, FinderTagValue};
@@ -157,6 +157,7 @@ impl Default for IngestImportRequest {
             folder_id: None,
             image_base64: None,
             mime: None,
+            source_ref: None,
         }
     }
 }
@@ -251,6 +252,13 @@ struct SourceIdArgs {
 struct SourceEnabledArgs {
     source_id: String,
     enabled: bool,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct SourceRunArgs {
+    source_id: String,
+    summary: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -584,6 +592,8 @@ pub fn import_url(state: &AppState, req: IngestImportRequest) -> Result<crate::m
         req.folder_id,
         inline.as_deref(),
         req.mime.as_deref(),
+        Some("plugin"),
+        req.source_ref.as_deref(),
     )
 }
 
@@ -655,6 +665,77 @@ pub fn list_picker_dir(path: Option<String>, kind: Option<String>) -> Result<Ext
 
 pub fn list_finder_tags() -> Vec<FinderTag> {
     finder_tags::default_finder_tags()
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct AllLinkedArgs {
+    tag: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+pub fn list_all_linked_media(
+    tag: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<ExternalListing, String> {
+    let media_limit = limit.unwrap_or(72);
+    let media_offset = offset.unwrap_or(0);
+    let tag = tag
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(tag) = tag {
+        let t0 = std::time::Instant::now();
+        let mut seen = std::collections::HashSet::new();
+        let mut media = Vec::new();
+        for (kind, root) in linked_source_roots() {
+            if !root.exists() {
+                continue;
+            }
+            let Ok(safe) = ensure_under_kind(&root, kind) else {
+                continue;
+            };
+            let scope = finder_tags::tag_scope_for(&safe);
+            let Ok(listing) =
+                finder_tags::list_by_finder_tag(&scope, &tag, 4000, 0, &root)
+            else {
+                continue;
+            };
+            for item in listing.media {
+                if seen.insert(item.path.clone()) {
+                    media.push(item);
+                }
+            }
+        }
+        let total = media.len();
+        let page: Vec<_> = media
+            .into_iter()
+            .skip(media_offset)
+            .take(media_limit)
+            .collect();
+        let truncated = media_offset + page.len() < total;
+        log::info!(
+            target: "inspirex",
+            "all_linked_tag tag={} total={} page={} offset={} truncated={} ms={}",
+            tag,
+            total,
+            page.len(),
+            media_offset,
+            truncated,
+            t0.elapsed().as_millis()
+        );
+        return Ok(ExternalListing {
+            root: "inspirex://all".into(),
+            path: "inspirex://all".into(),
+            parent: None,
+            folders: Vec::new(),
+            media: page,
+            truncated,
+            total_media: total,
+        });
+    }
+    Ok(crate::browse::list_all_linked_media(media_limit, media_offset))
 }
 
 pub fn list_browse_by_tag(
@@ -754,6 +835,13 @@ pub fn apply_finder_tag(
 pub fn get_image_thumb(state: &AppState, path: String, max_side: Option<u32>) -> Result<String, String> {
     let p = PathBuf::from(&path);
     let _ = ensure_readable(&p)?;
+    log::info!(
+        target: "inspirex",
+        "thumb_req path={} video={} max_side={}",
+        p.display(),
+        crate::pipeline::is_video(&p),
+        max_side.unwrap_or(240)
+    );
     let thumb = crate::thumb::ensure_image_thumb(&p, &state.library_path, max_side.unwrap_or(240))?;
     Ok(thumb.display().to_string())
 }
@@ -918,6 +1006,10 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
             let a: BrowseByTagArgs = parse(&args)?;
             json_ok(list_browse_by_tag(a.path, a.tag, a.limit, a.offset, a.kind)?)
         }
+        "list_all_linked_media" => {
+            let a: AllLinkedArgs = parse(&args)?;
+            json_ok(list_all_linked_media(a.tag, a.limit, a.offset)?)
+        }
         "get_finder_tags" => {
             let a: PathArgs = parse(&args)?;
             json_ok(get_finder_tags(a.path)?)
@@ -942,6 +1034,11 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
         "set_source_enabled" => {
             let a: SourceEnabledArgs = parse(&args)?;
             set_source_enabled(state, a.source_id, a.enabled)?;
+            Ok(Value::Null)
+        }
+        "report_source_run" => {
+            let a: SourceRunArgs = parse(&args)?;
+            crate::subscribe::report_source_run(state, &a.source_id, &a.summary)?;
             Ok(Value::Null)
         }
         "pull_source" => {
@@ -1005,6 +1102,15 @@ mod tests {
         assert!(listing["path"].as_str().unwrap().len() > 1);
         assert!(listing["folders"].is_array());
         assert!(listing["media"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dispatch_list_all_linked_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(dir.path().join("Library"));
+        let listing = dispatch(&state, "list_all_linked_media", json!({"limit": 10})).unwrap();
+        assert!(listing["media"].is_array());
+        assert_eq!(listing["path"], "inspirex://all");
     }
 
     #[test]

@@ -73,6 +73,7 @@ PY
   cargo test --quiet rss_pull_then_skip_duplicate -- --nocapture
   cargo test --quiet html_page_pull_then_skip_duplicate -- --nocapture
   cargo test --quiet html_page_respects_robots_disallow -- --nocapture
+  cargo test --quiet plugin_watch_create_and_rust_does_not_crawl -- --nocapture
   cargo test --quiet mock_single_and_batch -- --nocapture
 )
 ok "mock import / rss / imagegen"

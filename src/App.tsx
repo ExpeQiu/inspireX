@@ -392,16 +392,41 @@ function fmtSize(n?: number | null): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function linkedSourceLabel(
+  path: string,
+  volumeRoots: PinnedFolder[],
+  localRoots: PinnedFolder[],
+  hubRoot: string,
+): string {
+  const p = path.replace(/\/$/, "");
+  const under = (root: string) => {
+    const r = root.replace(/\/$/, "");
+    return r !== "" && (p === r || p.startsWith(`${r}/`));
+  };
+  if (under(hubRoot)) return "中转站";
+  if (volumeRoots.some((r) => under(r.path))) return "外置卷";
+  if (localRoots.some((r) => under(r.path))) return "本地库";
+  return "链接";
+}
+
 function sourceKindLabel(kind?: string | null): string {
   switch (kind) {
     case "web":
       return "订阅";
     case "plugin":
       return "插件";
+    case "plugin_watch":
+      return "盯梢";
+    case "rss":
+      return "RSS";
+    case "html_page":
+      return "网页";
+    case "url_list":
+      return "URL 列表";
     case "ai":
       return "AI";
     default:
-      return "本地";
+      return kind || "本地";
   }
 }
 
@@ -506,7 +531,9 @@ function ExternalThumb({
       aspectCache.get(item.path) ??
       (item.kind === "video" ? "16 / 9" : "3 / 4"),
   );
-  const [ready, setReady] = useState(() => aspectCache.has(item.path));
+  const [ready, setReady] = useState(
+    () => aspectCache.has(item.path) || item.kind === "video",
+  );
 
   const rememberRatio = useCallback((w: number, h: number) => {
     const r = ratioFromSize(w, h);
@@ -546,11 +573,6 @@ function ExternalThumb({
     setSrc(null);
     setErr(false);
 
-    if (item.kind === "video") {
-      setSrc(convertFileSrc(item.path));
-      return;
-    }
-
     const cancelQueue = enqueueThumb(async () => {
       if (cancelled) return;
       try {
@@ -560,7 +582,12 @@ function ExternalThumb({
         });
         if (!cancelled) setSrc(convertFileSrc(thumbPath));
       } catch {
-        if (!cancelled) setSrc(convertFileSrc(item.path));
+        if (cancelled) return;
+        if (item.kind === "video") {
+          setErr(true);
+        } else {
+          setSrc(convertFileSrc(item.path));
+        }
       }
     });
 
@@ -572,17 +599,22 @@ function ExternalThumb({
 
   let body: ReactNode;
   if (err) {
-    body = <div className="thumb-fallback">无法预览</div>;
+    body = (
+      <div className="thumb-fallback">
+        {item.kind === "video" ? "视频" : "无法预览"}
+      </div>
+    );
   } else if (!visible || !src) {
     body = <div className="thumb-fallback">{visible ? "加载中…" : ""}</div>;
-  } else if (item.kind === "video") {
+  } else if (item.kind === "video" && large) {
     body = (
       <div className="thumb-inner">
         <video
-          src={src}
+          src={convertFileSrc(item.path)}
+          poster={src}
           muted
-          controls={large}
-          preload={large ? "metadata" : "none"}
+          controls
+          preload="metadata"
           className="video-thumb"
           onLoadedMetadata={(e) =>
             rememberRatio(e.currentTarget.videoWidth, e.currentTarget.videoHeight)
@@ -604,6 +636,11 @@ function ExternalThumb({
           }
           onError={() => setErr(true)}
         />
+        {item.kind === "video" ? (
+          <span className="thumb-play" aria-hidden>
+            ▶
+          </span>
+        ) : null}
       </div>
     );
   }
@@ -684,6 +721,11 @@ export default function App() {
   const [sidebarHidden, setSidebarHidden] = useState<Set<string>>(() => loadSidebarHidden());
   const listingRef = useRef<ExternalListing | null>(null);
   listingRef.current = listing;
+  const [libraryMedia, setLibraryMedia] = useState<ExternalItem[]>([]);
+  const [libraryMediaTruncated, setLibraryMediaTruncated] = useState(false);
+  const [libraryMediaTotal, setLibraryMediaTotal] = useState(0);
+  const libraryMediaRef = useRef<ExternalItem[]>([]);
+  libraryMediaRef.current = libraryMedia;
   const browseAnchorRef = useRef<string | null>(null);
   const tagFilterRef = useRef<string | null>(null);
   tagFilterRef.current = tagFilter;
@@ -889,32 +931,79 @@ export default function App() {
     return list;
   }, [customFinderTags, hiddenFinderTags, tags]);
 
-  const refreshLibrary = useCallback(async () => {
-    const [lib, folds, tagList] = await Promise.all([
-      invoke<LibraryInfo>("get_library_info"),
-      invoke<Folder[]>("list_folders"),
-      invoke<Tag[]>("list_tags"),
-    ]);
-    setInfo(lib);
-    setFolders(folds);
-    setTags(tagList);
+  const refreshLibrary = useCallback(async (append = false) => {
+    let assetN = 0;
+    if (!append) {
+      const [lib, folds, tagList] = await Promise.all([
+        invoke<LibraryInfo>("get_library_info"),
+        invoke<Folder[]>("list_folders"),
+        invoke<Tag[]>("list_tags"),
+      ]);
+      setInfo(lib);
+      setFolders(folds);
+      setTags(tagList);
 
-    if (colorFilter) {
-      const list = await invoke<Asset[]>("search_assets", {
-        query: { colorHex: colorFilter, useClip: false, limit: 200 },
-      });
-      setAssets(list);
-      return;
+      if (colorFilter) {
+        const list = await invoke<Asset[]>("search_assets", {
+          query: { colorHex: colorFilter, useClip: false, limit: 200 },
+        });
+        setAssets(list);
+        setLibraryMedia([]);
+        setLibraryMediaTruncated(false);
+        setLibraryMediaTotal(0);
+        return;
+      }
+      if (tagFilter) {
+        const list = await invoke<Asset[]>("search_assets", {
+          query: { tag: tagFilter, useClip: false, limit: 200 },
+        });
+        setAssets(list);
+        assetN = list.length;
+      } else {
+        const list = await invoke<Asset[]>("list_assets", { folderId, limit: 200 });
+        setAssets(list);
+        assetN = list.length;
+      }
     }
-    if (tagFilter) {
-      const list = await invoke<Asset[]>("search_assets", {
-        query: { tag: tagFilter, useClip: false, limit: 200 },
+
+    if (colorFilter) return;
+    const offset = append ? libraryMediaRef.current.length : 0;
+    try {
+      const linked = await invoke<ExternalListing>("list_all_linked_media", {
+        tag: tagFilter,
+        limit: BROWSE_PAGE_SIZE,
+        offset,
       });
-      setAssets(list);
-      return;
+      const mediaShown = append
+        ? libraryMediaRef.current.length + linked.media.length
+        : linked.media.length;
+      setLibraryMedia((cur) => (append ? [...cur, ...linked.media] : linked.media));
+      setLibraryMediaTruncated(linked.truncated);
+      setLibraryMediaTotal(linked.totalMedia);
+      console.info("[inspirex]", {
+        event: "library_all_sources",
+        asset_count: append ? undefined : assetN,
+        media: mediaShown,
+        total_media: linked.totalMedia,
+        tag: tagFilter,
+        append,
+      });
+      if (!append) {
+        setStatus(
+          (tagFilter ? `标签 · ${tagFilter} · ` : "全部素材 · ") +
+            `入库 ${assetN} · 链接 ${linked.totalMedia}` +
+            (linked.truncated ? `（已显示 ${linked.media.length}）` : "") +
+            "（外置卷/本地库/中转站不另存副本）",
+        );
+      }
+    } catch (e) {
+      if (!append) {
+        setLibraryMedia([]);
+        setLibraryMediaTruncated(false);
+        setLibraryMediaTotal(0);
+      }
+      console.warn("[inspirex]", { event: "library_linked_fail", err: String(e) });
     }
-    const list = await invoke<Asset[]>("list_assets", { folderId, limit: 200 });
-    setAssets(list);
   }, [folderId, tagFilter, colorFilter]);
 
   const refreshFolders = useCallback(async () => {
@@ -964,16 +1053,18 @@ export default function App() {
         query: { tag: tagFilter, useClip: false, limit: 400 },
       });
       list = tagged.filter((a) => isFeed(a) && (!ref || a.sourceRef === ref));
-    } else if (ref) {
-      list = await invoke<Asset[]>("list_assets", {
-        sourceKind: "web",
-        sourceRef: ref,
-        limit: 400,
-      });
     } else {
       const [web, plugin] = await Promise.all([
-        invoke<Asset[]>("list_assets", { sourceKind: "web", limit: 400 }),
-        invoke<Asset[]>("list_assets", { sourceKind: "plugin", limit: 400 }),
+        invoke<Asset[]>("list_assets", {
+          sourceKind: "web",
+          sourceRef: ref ?? null,
+          limit: 400,
+        }),
+        invoke<Asset[]>("list_assets", {
+          sourceKind: "plugin",
+          sourceRef: ref ?? null,
+          limit: 400,
+        }),
       ]);
       list = [...web, ...plugin].sort((a, b) =>
         (b.createdAt || "").localeCompare(a.createdAt || ""),
@@ -1121,41 +1212,44 @@ export default function App() {
 
   const applyFinderTagToSelection = useCallback(
     async (tag: FinderTag, remove = false) => {
-      if (mode === "browse") {
+      if (mode === "browse" || (mode === "library" && (browseSelected.size > 0 || picked))) {
         const paths =
           browseSelected.size > 0
             ? [...browseSelected]
             : picked
               ? [picked.path]
               : [];
-        if (paths.length === 0) {
-          setStatus("请先勾选素材，再贴标签（与 Finder 把文件拖到标签上相同）");
-          return;
-        }
-        try {
-          const n = await invoke<number>("apply_finder_tag", {
-            paths,
-            tag: tag.name,
-            color: tag.color,
-            remove,
-          });
-          setStatus(
-            remove
-              ? `已去掉「${tag.name}」· ${n} 个文件`
-              : `已贴上「${tag.name}」· ${n} 个文件`,
-          );
-          if (picked && paths.includes(picked.path)) {
-            const next = await invoke<FinderTagValue[]>("get_finder_tags", {
-              path: picked.path,
+        if (paths.length > 0) {
+          try {
+            const n = await invoke<number>("apply_finder_tag", {
+              paths,
+              tag: tag.name,
+              color: tag.color,
+              remove,
             });
-            setPickedTags(next);
+            setStatus(
+              remove
+                ? `已去掉「${tag.name}」· ${n} 个文件`
+                : `已贴上「${tag.name}」· ${n} 个文件`,
+            );
+            if (picked && paths.includes(picked.path)) {
+              const next = await invoke<FinderTagValue[]>("get_finder_tags", {
+                path: picked.path,
+              });
+              setPickedTags(next);
+            }
+            if (tagFilterRef.current) {
+              if (mode === "browse") await refreshBrowse(browsePath);
+              else await refreshLibrary();
+            }
+          } catch (e) {
+            setStatus(`标签失败: ${e}`);
           }
-          if (tagFilterRef.current) {
-            await refreshBrowse(browsePath);
-          }
-        } catch (e) {
-          setStatus(`标签失败: ${e}`);
+          if (mode === "browse" || !selected) return;
         }
+      }
+      if (mode === "browse") {
+        setStatus("请先勾选素材，再贴标签（与 Finder 把文件拖到标签上相同）");
         return;
       }
       if (!selected) {
@@ -1218,12 +1312,15 @@ export default function App() {
           tag: tag.name,
           remove,
         });
-        if (tagFilterRef.current) await refreshBrowse(browsePath);
+        if (tagFilterRef.current) {
+          if (mode === "library") await refreshLibrary();
+          else await refreshBrowse(browsePath);
+        }
       } catch (e) {
         setStatus(`标签失败: ${e}`);
       }
     },
-    [picked, browsePath, refreshBrowse],
+    [picked, browsePath, refreshBrowse, refreshLibrary, mode],
   );
 
   const addPickedTagByName = useCallback(async () => {
@@ -1266,6 +1363,11 @@ export default function App() {
     if (!browsePath || !cur?.truncated || busy) return;
     refreshBrowse(browsePath, true).catch((e) => setStatus(String(e)));
   }, [browsePath, busy, refreshBrowse]);
+
+  const loadMoreLibrary = useCallback(() => {
+    if (!libraryMediaTruncated || busy) return;
+    refreshLibrary(true).catch((e) => setStatus(String(e)));
+  }, [libraryMediaTruncated, busy, refreshLibrary]);
 
   useEffect(() => {
     invoke<Tag[]>("list_tags")
@@ -1363,6 +1465,15 @@ export default function App() {
     refreshBrowse(browsePath).catch((e) => setStatus(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅随导航/筛选变化加载，避免死循环
   }, [mode, folderId, tagFilter, colorFilter, browsePath, browseKind, sourceFilterId, genFilterId, viewFolderId]);
+
+  useEffect(() => {
+    if (mode !== "subscribe") return;
+    const tick = window.setInterval(() => {
+      refreshSources().catch(() => {});
+      refreshSubscribeResults(sourceFilterId).catch(() => {});
+    }, 15000);
+    return () => window.clearInterval(tick);
+  }, [mode, sourceFilterId, refreshSources, refreshSubscribeResults]);
 
   const importPathsToLibrary = async (
     paths: string[],
@@ -1863,6 +1974,7 @@ export default function App() {
 
   const openAssetDetail = (a: Asset) => {
     setPickedGen(null);
+    setPicked(null);
     setSelected(a);
     setTagDraft(a.tags.join(", "));
     setNotesDraft(a.notes || "");
@@ -2153,7 +2265,10 @@ export default function App() {
   };
 
   const selectBrowseRange = (toPath: string) => {
-    const paths = listing?.media.map((m) => m.path) ?? [];
+    const paths =
+      mode === "library"
+        ? libraryMedia.map((m) => m.path)
+        : listing?.media.map((m) => m.path) ?? [];
     const anchor = browseAnchorRef.current ?? toPath;
     const i1 = paths.indexOf(anchor);
     const i2 = paths.indexOf(toPath);
@@ -2181,6 +2296,7 @@ export default function App() {
     }
     setBrowseSelected(new Set([m.path]));
     browseAnchorRef.current = m.path;
+    setSelected(null);
     setPicked(m);
   };
 
@@ -2338,7 +2454,10 @@ export default function App() {
       : tagFilter
         ? ` · 标签 ${tagFilter}`
         : "";
-    return `${info.assetCount} 素材 · ${info.aiMockMode ? "AI Mock" : "本地 CLIP"} · ${info.clipModel ?? ""} · 采集 :${info.ingestPort ?? 18765}${filterHint}`;
+    const linkedHint = libraryMediaTotal
+      ? ` · 链接 ${libraryMediaTotal}`
+      : "";
+    return `${info.assetCount} 入库${linkedHint} · ${info.aiMockMode ? "AI Mock" : "本地 CLIP"} · ${info.clipModel ?? ""} · 采集 :${info.ingestPort ?? 18765}${filterHint}`;
   }, [
     viewFolderId,
     folders,
@@ -2352,6 +2471,7 @@ export default function App() {
     info,
     colorFilter,
     sources.length,
+    libraryMediaTotal,
   ]);
 
   return (
@@ -2375,6 +2495,7 @@ export default function App() {
               setViewFolderId(null);
               setPicked(null);
               setFolderId(null);
+              setTagFilter(null);
               setColorFilter(null);
               setQuery("");
             })
@@ -2829,7 +2950,14 @@ export default function App() {
                 {mode === "subscribe" ? "订阅 / RSS" : "AI 生图"}
               </div>
               {mode === "subscribe" ? (
-                <button type="button" onClick={() => refreshSources()} disabled={busy}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    refreshSources();
+                    refreshSubscribeResults(sourceFilterId);
+                  }}
+                  disabled={busy}
+                >
                   刷新
                 </button>
               ) : (
@@ -3293,18 +3421,31 @@ export default function App() {
                 >
                   <div>
                     <div className="name">{s.name}</div>
-                    <div className="hint">{s.kind} · {s.url}</div>
+                    <div className="hint">
+                      {sourceKindLabel(s.kind)}
+                      {s.kind === "plugin_watch"
+                        ? s.enabled
+                          ? " · 盯梢中（需保持页面打开）"
+                          : " · 已暂停"
+                        : ""}
+                      {" · "}
+                      {s.url}
+                    </div>
                     <div className="hint">
                       {s.lastRunAt
                         ? `上次 ${new Date(s.lastRunAt).toLocaleString()}`
-                        : "尚未拉取"}
+                        : s.kind === "plugin_watch"
+                          ? "尚未扫描"
+                          : "尚未拉取"}
                       {s.lastError ? ` · ${s.lastError}` : ""}
                     </div>
                   </div>
                   <div className="source-actions">
-                    <button type="button" className="primary" disabled={busy} onClick={(e) => { e.stopPropagation(); onPullSource(s.id); }}>
-                      立即拉取
-                    </button>
+                    {s.kind === "plugin_watch" ? null : (
+                      <button type="button" className="primary" disabled={busy} onClick={(e) => { e.stopPropagation(); onPullSource(s.id); }}>
+                        立即拉取
+                      </button>
+                    )}
                     <button type="button" onClick={(e) => { e.stopPropagation(); onToggleSource(s); }}>
                       {s.enabled ? "暂停" : "启用"}
                     </button>
@@ -3338,7 +3479,7 @@ export default function App() {
                     <p>
                       {tagFilter
                         ? `没有带「${tagFilter}」标签的订阅图片。`
-                        : "还没有订阅图片。添加 RSS / 公开网页并拉取，或用浏览器插件保存后，会显示在这里。"}
+                        : "还没有订阅图片。添加 RSS / 公开网页并拉取，或用插件「盯梢此页」/ 多选保存。"}
                     </p>
                   </div>
                 ) : (
@@ -3634,17 +3775,53 @@ export default function App() {
           </section>
         ) : (
           <section className="grid">
-            {assets.length === 0 ? (
+            {assets.length === 0 && libraryMedia.length === 0 ? (
               <div className="empty">
                 <p>
                   {tagFilter
                     ? `没有带「${tagFilter}」标签的素材。点开一张图，再点标签旁 + 即可贴上。`
-                    : "库是空的。订阅源和 AI 生图会保存在这里；外置卷、本地库、中转站只浏览原文件。"}
+                    : "还没有可展示的图片。外置卷 / 本地库 / 中转站用「追加文件夹」绑定后会显示在这里；订阅、插件、AI 生图入库后也会出现。"}
                 </p>
-                <p className="hint">外置卷 / 本地库 / 中转站不另存副本</p>
+                <p className="hint">外置卷 / 本地库 / 中转站只链接原文件，不另存副本</p>
               </div>
             ) : (
-              assets.map((a) => (
+              <>
+                {libraryMedia.map((m) => (
+                  <div
+                    key={m.path}
+                    className={`card ${picked?.path === m.path ? "card-active" : ""} ${browseSelected.has(m.path) ? "card-selected" : ""}`}
+                  >
+                    <button
+                      type="button"
+                      className="card-check"
+                      title="勾选 / 取消"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (e.shiftKey) {
+                          selectBrowseRange(m.path);
+                          return;
+                        }
+                        toggleBrowseSelect(m.path);
+                      }}
+                    >
+                      {browseSelected.has(m.path) ? "✓" : ""}
+                    </button>
+                    <button
+                      type="button"
+                      className="card-body"
+                      onClick={(e) => onBrowseMediaClick(m, e)}
+                    >
+                      <ExternalThumb item={m} />
+                      <div className="card-meta">
+                        <span className="name">{m.name}</span>
+                        <span className="badge">
+                          {linkedSourceLabel(m.path, volumeRoots, localRoots, hubRoot)}
+                        </span>
+                      </div>
+                    </button>
+                  </div>
+                ))}
+                {assets.map((a) => (
                 <div
                   key={a.id}
                   className={`card ${selected?.id === a.id ? "card-active" : ""} ${libSelected.has(a.id) ? "card-selected" : ""}`}
@@ -3688,7 +3865,17 @@ export default function App() {
                     </div>
                   </button>
                 </div>
-              ))
+                ))}
+                {libraryMediaTruncated ? (
+                  <div className="load-more">
+                    <button type="button" onClick={loadMoreLibrary} disabled={busy}>
+                      {busy
+                        ? "加载中…"
+                        : `加载更多链接图（已 ${libraryMedia.length}/${libraryMediaTotal}）`}
+                    </button>
+                  </div>
+                ) : null}
+              </>
             )}
           </section>
         )}
