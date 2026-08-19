@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "InspireX Capture",
+  "version": "0.1.0",
+  "description": "将网页图片保存到本机灵犀 InspireX 素材库",
+  "permissions": ["contextMenus", "storage", "activeTab", "scripting", "tabs"],
+  "host_permissions": ["http://127.0.0.1/*", "https://*/*", "http://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "InspireX",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  }
+}

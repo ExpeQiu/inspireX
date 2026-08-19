@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>InspireX 设置</title>
+    <style>
+      body {
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        margin: 16px;
+        color: #1c1a17;
+      }
+      label {
+        display: grid;
+        gap: 4px;
+        margin-bottom: 12px;
+        font-size: 13px;
+      }
+      input {
+        padding: 8px;
+        border: 1px solid #d5cfc3;
+        border-radius: 8px;
+      }
+      button {
+        padding: 8px 14px;
+        border-radius: 8px;
+        border: 0;
+        background: #2f5d50;
+        color: #fff;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>采集端点</h3>
+    <label>
+      端口
+      <input id="port" type="number" value="18765" />
+    </label>
+    <label>
+      Token（与 .env INSPIREX_INGEST_TOKEN 一致）
+      <input id="token" type="text" value="inspirex-local" />
+    </label>
+    <button id="save">保存</button>
+    <p id="msg" style="font-size: 12px; color: #6b655c"></p>
+    <script src="options.js"></script>
+  </body>
+</html>

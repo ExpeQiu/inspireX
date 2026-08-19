@@ -1,0 +1,882 @@
+:root {
+  --bg: #f3f1ec;
+  --surface: #faf9f6;
+  --surface-2: #e8e4dc;
+  --ink: #1c1a17;
+  --muted: #6b655c;
+  --line: #d5cfc3;
+  --accent: #2f5d50;
+  --accent-ink: #f4faf7;
+  --danger: #8b3a2f;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Songti SC", serif;
+  color: var(--ink);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, #efe8d8 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #dce8e2 0%, transparent 50%),
+    var(--bg);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  height: 100%;
+  min-height: 100vh;
+}
+
+.sidebar,
+.detail {
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border-right: 1px solid var(--line);
+  padding: 20px 14px;
+  overflow: auto;
+}
+
+.detail {
+  border-right: none;
+  border-left: 1px solid var(--line);
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: min(480px, 90vw);
+  z-index: 6;
+  background: var(--surface);
+}
+
+.detail-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: default;
+  background: color-mix(in srgb, var(--ink) 18%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.app-detail-open .main {
+  padding-right: min(480px, 90vw);
+}
+
+.selection-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(10px);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.selection-count {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.selection-hint {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.brand {
+  margin-bottom: 28px;
+  padding: 4px 8px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand-name {
+  font-size: 28px;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+}
+
+.brand-sub {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  margin-top: 4px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.nav-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 18px 8px 8px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.nav-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.nav-item:hover,
+.nav-item.active {
+  background: var(--surface-2);
+}
+
+.nav-row {
+  display: flex;
+  align-items: stretch;
+  border-radius: 8px;
+}
+
+.nav-row:hover,
+.nav-row.active {
+  background: var(--surface-2);
+}
+
+.nav-row .nav-item {
+  flex: 1;
+  min-width: 0;
+  border-radius: 8px 0 0 8px;
+}
+
+.nav-row .nav-item:hover,
+.nav-row .nav-item.active {
+  background: transparent;
+}
+
+.nav-del {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 10px;
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+  opacity: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.nav-row:hover .nav-del,
+.nav-row.active .nav-del {
+  opacity: 1;
+}
+
+.nav-del:hover {
+  color: var(--danger);
+}
+
+.nav-label-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-tag {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tag-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 18%);
+  flex: 0 0 12px;
+}
+
+.nav-tag-apply {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  padding: 0 6px;
+  cursor: pointer;
+  opacity: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.nav-row:hover .nav-tag-apply,
+.nav-row.active .nav-tag-apply {
+  opacity: 1;
+}
+
+.nav-tag-apply:hover {
+  color: var(--ink);
+}
+
+.nav-row .nav-tag-apply + .nav-del {
+  border-radius: 0 8px 8px 0;
+}
+
+.finder-tag-block {
+  margin: 12px 0 16px;
+}
+
+.finder-tag-label {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.finder-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.finder-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 4px 10px 4px 8px;
+  font-size: 12px;
+}
+
+.finder-tag-chip.on {
+  background: var(--surface-2);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+.linkish {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.linkish-sm {
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.toolbar {
+  padding: 16px 20px 8px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.search-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.search-row input[type="text"],
+.search-row input:not([type]),
+.tag-label input {
+  flex: 1;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 10px 12px;
+  outline: none;
+}
+
+.search-row input:focus,
+.tag-label input:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.clip-toggle {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 13px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  white-space: nowrap;
+}
+
+button {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+}
+
+.meta,
+.status {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.status {
+  color: var(--accent);
+}
+
+.path-ask {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.path-ask input {
+  flex: 1;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 10px 12px;
+  outline: none;
+}
+
+.grid {
+  padding: 16px 20px 28px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 14px;
+  align-content: start;
+  overflow: auto;
+}
+
+.empty {
+  grid-column: 1 / -1;
+  padding: 80px 20px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.empty button {
+  margin-top: 14px;
+}
+
+.hub-suggest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.hub-suggest button {
+  margin-top: 0;
+}
+
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 10px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
+.crumb {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.crumb:hover {
+  background: var(--surface-2);
+}
+
+.crumb-sep {
+  color: var(--muted);
+  margin: 0 2px;
+}
+
+.folder-thumb {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 12px;
+  background: linear-gradient(160deg, #e7efe9, var(--surface-2));
+}
+
+.video-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #1c1a17;
+}
+
+.detail-preview video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #111;
+  display: block;
+}
+
+.thumb-fallback {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  background: var(--surface-2);
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  transition: transform 160ms ease, border-color 160ms ease;
+  content-visibility: auto;
+  contain-intrinsic-size: 200px;
+  position: relative;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+}
+
+.card-active,
+.card-selected {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, white);
+  outline-offset: 1px;
+}
+
+.card-body {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.card-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--accent);
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.nav-count {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  margin-left: 6px;
+}
+
+.card-remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--muted);
+  padding: 0;
+  cursor: pointer;
+  opacity: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.card:hover .card-remove,
+.card-active .card-remove {
+  opacity: 1;
+}
+
+.card-remove:hover {
+  color: var(--danger);
+}
+
+.nav-hint {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 12px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.color-chip {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.detail-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+button.danger {
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+}
+
+.tag-label select,
+.tag-label textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 10px 12px;
+  outline: none;
+  font: inherit;
+  resize: vertical;
+}
+
+.path-dd {
+  word-break: break-all;
+  font-size: 12px;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 13px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.thumb {
+  aspect-ratio: 1;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.thumb-inner {
+  width: 100%;
+  height: 100%;
+}
+
+.thumb img,
+.thumb-inner img,
+.detail-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+
+.card {
+  touch-action: none;
+  user-select: none;
+}
+
+.load-more {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
+}
+
+.load-more button {
+  min-width: 220px;
+}
+
+.card-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: 12px;
+}
+
+.name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.detail h2 {
+  font-size: 18px;
+  margin: 12px 0;
+  word-break: break-all;
+}
+
+.detail-preview {
+  border-radius: 12px;
+  overflow: hidden;
+  aspect-ratio: 1;
+}
+
+.detail .close {
+  margin-bottom: 12px;
+}
+
+dl {
+  margin: 0 0 16px;
+  display: grid;
+  gap: 8px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
+dl div {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 8px;
+}
+
+dt {
+  color: var(--muted);
+}
+
+dd {
+  margin: 0;
+}
+
+.tag-label {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--muted);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.tag-label textarea,
+.tag-label select,
+.form-card input,
+.form-card textarea,
+.form-card select {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 10px 12px;
+  outline: none;
+  font: inherit;
+  width: 100%;
+}
+
+.panel {
+  padding: 16px 20px 28px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.panel-split {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) 1fr;
+  gap: 16px;
+  padding-bottom: 16px;
+}
+
+.panel-left,
+.panel-right {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.panel-right {
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  padding: 0 4px;
+}
+
+.result-grid {
+  padding: 4px 0 8px;
+  flex: 1;
+}
+
+.source-card-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.panel-title {
+  flex: 1;
+  font-size: 20px;
+  letter-spacing: 0.03em;
+}
+
+.form-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.source-card,
+.job-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.source-card.dim {
+  opacity: 0.55;
+}
+
+.source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.job-row .name,
+.source-card .name {
+  font-weight: 600;
+}
+
+@media (max-width: 960px) {
+  .app {
+    grid-template-columns: 180px 1fr;
+  }
+  .panel-split {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+  .detail {
+    position: fixed;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: min(480px, 90vw);
+    background: var(--surface);
+    z-index: 5;
+  }
+}

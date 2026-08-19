@@ -1,0 +1,3 @@
+# Lexar 外置卷会产生 AppleDouble(._*)，污染 target 导致 tauri build 失败
+[build]
+target-dir = "/Users/expeqiu/.cache/inspirex-cargo-target"
