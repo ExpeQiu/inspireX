@@ -107,8 +107,17 @@ pub struct SearchQuery {
     pub tag: Option<String>,
     /// 以 #RRGGBB 主色相近搜图
     pub color_hex: Option<String>,
+    #[serde(default)]
     pub use_clip: bool,
     pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvokeRequest {
+    pub cmd: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

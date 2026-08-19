@@ -22,9 +22,9 @@ if [[ -f .run/inspirex.pid ]]; then
   rm -f .run/inspirex.pid
 fi
 
-# 清理残留 vite / tauri 开发端口
+# 清理残留 vite / tauri / ingest 端口
 if command -v lsof >/dev/null 2>&1; then
-  for port in 1420; do
+  for port in 1420 18765; do
     PIDS=$(lsof -ti tcp:"$port" 2>/dev/null || true)
     if [[ -n "${PIDS}" ]]; then
       echo "[inspirex] free port $port: $PIDS"

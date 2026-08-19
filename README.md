@@ -2,14 +2,14 @@
 
 个人全本地视觉素材库（Tauri 2 + React + SQLite + Mock/本地 CLIP）。
 
-**架构**：模板 1（采集→管道→展示），裁剪为单机桌面。参考思路：`/Volumes/Lexar/git/03T/Uni-SIM`。决策见 `ADR/001-personal-local-clip.md`。
+**架构**：模板 1（采集→管道→展示），裁剪为单机。开发以浏览器为主界面，本机 Rust 进程常驻当后端（`127.0.0.1:18765`）。后续可单独封装桌面 App。决策见 `ADR/001`、`ADR/006`。
 
 ## 快速开始
 
 ```bash
 cp .env.example .env
 ./scripts/verify.sh
-./scripts/start.sh    # 开发窗口
+./scripts/start.sh    # 本机后端 + 浏览器主界面 http://127.0.0.1:1420
 ./scripts/stop.sh
 ```
 

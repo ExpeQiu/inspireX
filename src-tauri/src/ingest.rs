@@ -3,8 +3,9 @@
 //! 默认 127.0.0.1:18765，Bearer token 鉴权（浏览 GET 仅本机、不鉴权）。
 
 use crate::browse::{
-    add_local_index_root, ensure_readable, ensure_under_kind, list_browse_for_kind,
-    list_local_index_roots, parse_browse_kind, remove_local_index_root, root_for_kind,
+    add_index_root, add_local_index_root, ensure_readable, ensure_under_kind, list_browse_for_kind,
+    list_index_roots, list_local_index_roots, parse_browse_kind, remove_index_root,
+    remove_local_index_root, root_for_kind,
 };
 use crate::db;
 use crate::library::{create_folder, import_from_url, import_paths, library_info, AppState};
@@ -102,6 +103,72 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                                 path_log,
                                 e
                             );
+                            let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
+                        }
+                    }
+                    continue;
+                }
+
+                if path == "/v1/browse/index-roots" && method == Method::Get {
+                    let kind = parse_browse_kind(query_param(&url, "kind").as_deref());
+                    let list = list_index_roots(kind);
+                    let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
+                    let _ = request.respond(cors_json(StatusCode(200), &body));
+                    continue;
+                }
+
+                if path == "/v1/browse/index-roots" && method == Method::Post {
+                    match read_json::<serde_json::Value>(&mut request) {
+                        Ok(v) => {
+                            let kind = parse_browse_kind(v.get("kind").and_then(|x| x.as_str()));
+                            let raw = v
+                                .get("path")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .trim()
+                                .to_string();
+                            match add_index_root(kind, &PathBuf::from(raw)) {
+                                Ok(list) => {
+                                    let body =
+                                        serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
+                                    let _ = request.respond(cors_json(StatusCode(200), &body));
+                                }
+                                Err(e) => {
+                                    let _ = request
+                                        .respond(cors_json(StatusCode(400), &json_err(&e)));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
+                        }
+                    }
+                    continue;
+                }
+
+                if path == "/v1/browse/index-roots/remove" && method == Method::Post {
+                    match read_json::<serde_json::Value>(&mut request) {
+                        Ok(v) => {
+                            let kind = parse_browse_kind(v.get("kind").and_then(|x| x.as_str()));
+                            let raw = v
+                                .get("path")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .trim()
+                                .to_string();
+                            match remove_index_root(kind, &PathBuf::from(raw)) {
+                                Ok(list) => {
+                                    let body =
+                                        serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
+                                    let _ = request.respond(cors_json(StatusCode(200), &body));
+                                }
+                                Err(e) => {
+                                    let _ = request
+                                        .respond(cors_json(StatusCode(400), &json_err(&e)));
+                                }
+                            }
+                        }
+                        Err(e) => {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
@@ -271,6 +338,35 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                         },
                         Err(e) => {
                             let _ = request.respond(cors_json(StatusCode(403), &json_err(&e)));
+                        }
+                    }
+                    continue;
+                }
+
+                if path == "/v1/invoke" && method == Method::Post {
+                    match read_json::<crate::models::InvokeRequest>(&mut request) {
+                        Ok(req) => {
+                            let cmd = req.cmd.trim().to_string();
+                            log::info!(target: "inspirex", "http_invoke cmd={}", cmd);
+                            match crate::rpc::dispatch(&state, &cmd, req.args) {
+                                Ok(v) => {
+                                    let body =
+                                        serde_json::to_string(&v).unwrap_or_else(|_| "null".into());
+                                    let _ = request.respond(cors_json(StatusCode(200), &body));
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        target: "inspirex",
+                                        "http_invoke_fail cmd={} err={}",
+                                        cmd,
+                                        e
+                                    );
+                                    let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
                     continue;
@@ -703,5 +799,15 @@ mod tests {
             serde_json::from_str(r#"{"paths":["/Volumes/Q-V-P/a"],"folderId":"f1"}"#).unwrap();
         assert_eq!(paths.paths.len(), 1);
         assert_eq!(paths.folder_id.as_deref(), Some("f1"));
+    }
+
+    #[test]
+    fn invoke_request_parses_cmd_and_args() {
+        let req: crate::models::InvokeRequest = serde_json::from_str(
+            r##"{"cmd":"create_tag","args":{"name":"红","color":"#FF5F57"}}"##,
+        )
+        .unwrap();
+        assert_eq!(req.cmd, "create_tag");
+        assert_eq!(req.args["name"], "红");
     }
 }

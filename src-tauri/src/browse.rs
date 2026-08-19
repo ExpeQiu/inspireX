@@ -83,18 +83,63 @@ pub fn default_local_root() -> PathBuf {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users")))
 }
 
-/// 本地库虚拟根：不对应磁盘上的家目录，下列出用户绑定的多个索引路径。
+/// 本地库 / 外置卷虚拟根：不默认扫家目录或 /Volumes，下列出用户绑定的索引路径。
 pub const LOCAL_VIRTUAL_ROOT: &str = "inspirex://local";
+pub const VOLUMES_VIRTUAL_ROOT: &str = "inspirex://volumes";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct LocalIndexRoot {
+pub struct IndexRoot {
     pub name: String,
     pub path: String,
 }
 
-pub fn local_roots_config_file() -> PathBuf {
-    std::env::var("INSPIREX_LOCAL_ROOTS_CONFIG")
+pub type LocalIndexRoot = IndexRoot;
+
+pub fn virtual_root_for(kind: &str) -> &'static str {
+    match kind {
+        "local" => LOCAL_VIRTUAL_ROOT,
+        "volumes" => VOLUMES_VIRTUAL_ROOT,
+        _ => "",
+    }
+}
+
+pub fn is_kind_virtual_root(kind: &str, path: &Path) -> bool {
+    let v = virtual_root_for(kind);
+    if v.is_empty() {
+        return false;
+    }
+    let s = path.to_string_lossy();
+    s == v || s.is_empty()
+}
+
+pub fn is_local_virtual_root(path: &Path) -> bool {
+    is_kind_virtual_root("local", path)
+}
+
+pub fn is_volumes_virtual_root(path: &Path) -> bool {
+    is_kind_virtual_root("volumes", path)
+}
+
+fn index_kind_ok(kind: &str) -> bool {
+    kind == "local" || kind == "volumes"
+}
+
+fn index_kind_label(kind: &str) -> &'static str {
+    if kind == "volumes" {
+        "外置卷"
+    } else {
+        "本地库"
+    }
+}
+
+pub fn index_roots_config_file(kind: &str) -> PathBuf {
+    let (env_key, filename) = if kind == "volumes" {
+        ("INSPIREX_VOLUME_ROOTS_CONFIG", "volume-roots.json")
+    } else {
+        ("INSPIREX_LOCAL_ROOTS_CONFIG", "local-roots.json")
+    };
+    std::env::var(env_key)
         .ok()
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
@@ -102,13 +147,12 @@ pub fn local_roots_config_file() -> PathBuf {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("InspireX")
-                .join("local-roots.json")
+                .join(filename)
         })
 }
 
-pub fn is_local_virtual_root(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    s == LOCAL_VIRTUAL_ROOT || s == "inspirex:local" || s.is_empty()
+pub fn local_roots_config_file() -> PathBuf {
+    index_roots_config_file("local")
 }
 
 fn name_for_index_path(path: &Path) -> String {
@@ -135,7 +179,7 @@ fn path_under_root(path: &Path, root: &Path) -> bool {
     }
 }
 
-fn read_local_roots_file(config: &Path) -> Vec<LocalIndexRoot> {
+fn read_index_roots_file(config: &Path) -> Vec<IndexRoot> {
     let Ok(raw) = std::fs::read_to_string(config) else {
         return Vec::new();
     };
@@ -143,7 +187,7 @@ fn read_local_roots_file(config: &Path) -> Vec<LocalIndexRoot> {
     if t.is_empty() {
         return Vec::new();
     }
-    if let Ok(list) = serde_json::from_str::<Vec<LocalIndexRoot>>(t) {
+    if let Ok(list) = serde_json::from_str::<Vec<IndexRoot>>(t) {
         return list
             .into_iter()
             .filter(|r| !r.path.trim().is_empty())
@@ -155,7 +199,7 @@ fn read_local_roots_file(config: &Path) -> Vec<LocalIndexRoot> {
             .filter(|s| !s.trim().is_empty())
             .map(|path| {
                 let p = PathBuf::from(&path);
-                LocalIndexRoot {
+                IndexRoot {
                     name: name_for_index_path(&p),
                     path,
                 }
@@ -165,7 +209,7 @@ fn read_local_roots_file(config: &Path) -> Vec<LocalIndexRoot> {
     Vec::new()
 }
 
-fn write_local_roots_file(config: &Path, roots: &[LocalIndexRoot]) -> Result<(), String> {
+fn write_index_roots_file(config: &Path, roots: &[IndexRoot]) -> Result<(), String> {
     if let Some(parent) = config.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -173,22 +217,32 @@ fn write_local_roots_file(config: &Path, roots: &[LocalIndexRoot]) -> Result<(),
     std::fs::write(config, json).map_err(|e| e.to_string())
 }
 
-fn env_local_root_extra() -> Option<LocalIndexRoot> {
-    std::env::var("INSPIREX_LOCAL_ROOT")
+fn env_index_root_extra(kind: &str) -> Option<IndexRoot> {
+    let key = if kind == "volumes" {
+        "INSPIREX_BROWSE_ROOT"
+    } else {
+        "INSPIREX_LOCAL_ROOT"
+    };
+    std::env::var(key)
         .ok()
-        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| kind != "volumes" || s != "/Volumes")
         .map(|path| {
             let p = PathBuf::from(&path);
-            LocalIndexRoot {
+            IndexRoot {
                 name: name_for_index_path(&p),
                 path,
             }
         })
 }
 
-pub fn list_local_index_roots() -> Vec<LocalIndexRoot> {
-    let mut roots = read_local_roots_file(&local_roots_config_file());
-    if let Some(extra) = env_local_root_extra() {
+pub fn list_index_roots(kind: &str) -> Vec<IndexRoot> {
+    if !index_kind_ok(kind) {
+        return Vec::new();
+    }
+    let mut roots = read_index_roots_file(&index_roots_config_file(kind));
+    if let Some(extra) = env_index_root_extra(kind) {
         if !roots.iter().any(|r| r.path == extra.path) {
             roots.insert(0, extra);
         }
@@ -196,10 +250,17 @@ pub fn list_local_index_roots() -> Vec<LocalIndexRoot> {
     roots
 }
 
-pub fn add_local_index_root(path: &Path) -> Result<Vec<LocalIndexRoot>, String> {
+pub fn list_local_index_roots() -> Vec<IndexRoot> {
+    list_index_roots("local")
+}
+
+pub fn add_index_root(kind: &str, path: &Path) -> Result<Vec<IndexRoot>, String> {
+    if !index_kind_ok(kind) {
+        return Err("不支持的来源".into());
+    }
     let raw = path.to_string_lossy();
     let trimmed = raw.trim();
-    if trimmed.is_empty() || is_local_virtual_root(path) {
+    if trimmed.is_empty() || is_kind_virtual_root(kind, path) {
         return Err("请选择要绑定的文件夹".into());
     }
     let target = PathBuf::from(trimmed);
@@ -213,8 +274,8 @@ pub fn add_local_index_root(path: &Path) -> Result<Vec<LocalIndexRoot>, String> 
         .canonicalize()
         .unwrap_or_else(|_| target.clone());
     let name = name_for_index_path(&canon);
-    let config = local_roots_config_file();
-    let mut roots = read_local_roots_file(&config);
+    let config = index_roots_config_file(kind);
+    let mut roots = read_index_roots_file(&config);
     if roots.iter().any(|r| {
         PathBuf::from(&r.path)
             .canonicalize()
@@ -224,34 +285,43 @@ pub fn add_local_index_root(path: &Path) -> Result<Vec<LocalIndexRoot>, String> 
     }) {
         log::info!(
             target: "inspirex",
-            "local_root_exists path={} count={}",
+            "index_root_exists kind={} path={} count={}",
+            kind,
             canon.display(),
             roots.len()
         );
-        return Ok(list_local_index_roots());
+        return Ok(list_index_roots(kind));
     }
-    roots.push(LocalIndexRoot {
+    roots.push(IndexRoot {
         name: name.clone(),
         path: canon.display().to_string(),
     });
-    write_local_roots_file(&config, &roots)?;
+    write_index_roots_file(&config, &roots)?;
     log::info!(
         target: "inspirex",
-        "local_root_add path={} name={} count={} config={}",
+        "index_root_add kind={} path={} name={} count={} config={}",
+        kind,
         canon.display(),
         name,
         roots.len(),
         config.display()
     );
-    Ok(list_local_index_roots())
+    Ok(list_index_roots(kind))
 }
 
-pub fn remove_local_index_root(path: &Path) -> Result<Vec<LocalIndexRoot>, String> {
+pub fn add_local_index_root(path: &Path) -> Result<Vec<IndexRoot>, String> {
+    add_index_root("local", path)
+}
+
+pub fn remove_index_root(kind: &str, path: &Path) -> Result<Vec<IndexRoot>, String> {
+    if !index_kind_ok(kind) {
+        return Err("不支持的来源".into());
+    }
     let want = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let want_s = path.display().to_string();
-    let config = local_roots_config_file();
-    let roots = read_local_roots_file(&config);
-    let next: Vec<LocalIndexRoot> = roots
+    let config = index_roots_config_file(kind);
+    let roots = read_index_roots_file(&config);
+    let next: Vec<IndexRoot> = roots
         .into_iter()
         .filter(|r| {
             let p = PathBuf::from(&r.path);
@@ -259,18 +329,23 @@ pub fn remove_local_index_root(path: &Path) -> Result<Vec<LocalIndexRoot>, Strin
             canon != want && r.path != want_s && r.path != want.display().to_string()
         })
         .collect();
-    write_local_roots_file(&config, &next)?;
+    write_index_roots_file(&config, &next)?;
     log::info!(
         target: "inspirex",
-        "local_root_remove path={} count={}",
+        "index_root_remove kind={} path={} count={}",
+        kind,
         path.display(),
         next.len()
     );
-    Ok(list_local_index_roots())
+    Ok(list_index_roots(kind))
 }
 
-pub fn matching_local_root(path: &Path) -> Option<PathBuf> {
-    for r in list_local_index_roots() {
+pub fn remove_local_index_root(path: &Path) -> Result<Vec<IndexRoot>, String> {
+    remove_index_root("local", path)
+}
+
+pub fn matching_index_root(kind: &str, path: &Path) -> Option<PathBuf> {
+    for r in list_index_roots(kind) {
         let root = PathBuf::from(&r.path);
         if path_under_root(path, &root) {
             return Some(root);
@@ -279,10 +354,17 @@ pub fn matching_local_root(path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn ensure_under_any_local_root(path: &Path) -> Result<PathBuf, String> {
-    let roots = list_local_index_roots();
+pub fn matching_local_root(path: &Path) -> Option<PathBuf> {
+    matching_index_root("local", path)
+}
+
+fn ensure_under_any_index_root(kind: &str, path: &Path) -> Result<PathBuf, String> {
+    let label = index_kind_label(kind);
+    let roots = list_index_roots(kind);
     if roots.is_empty() {
-        return Err("尚未绑定本地库索引，请用「追加文件夹」添加目录".into());
+        return Err(format!(
+            "尚未绑定{label}索引，请用「追加文件夹」添加目录"
+        ));
     }
     let path_c = path
         .canonicalize()
@@ -294,13 +376,14 @@ fn ensure_under_any_local_root(path: &Path) -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "仅允许浏览已绑定的本地库索引，收到: {}",
+        "仅允许浏览已绑定的{label}索引，收到: {}",
         path_c.display()
     ))
 }
 
-pub fn list_local_index_listing() -> ExternalListing {
-    let roots = list_local_index_roots();
+pub fn list_index_listing(kind: &str) -> ExternalListing {
+    let virtual_root = virtual_root_for(kind);
+    let roots = list_index_roots(kind);
     let folders: Vec<ExternalItem> = roots
         .iter()
         .map(|r| {
@@ -322,7 +405,8 @@ pub fn list_local_index_listing() -> ExternalListing {
         .collect();
     log::info!(
         target: "inspirex",
-        "local_index_list count={} paths={}",
+        "index_list kind={} count={} paths={}",
+        kind,
         folders.len(),
         folders
             .iter()
@@ -331,8 +415,8 @@ pub fn list_local_index_listing() -> ExternalListing {
             .join(",")
     );
     ExternalListing {
-        root: LOCAL_VIRTUAL_ROOT.into(),
-        path: LOCAL_VIRTUAL_ROOT.into(),
+        root: virtual_root.into(),
+        path: virtual_root.into(),
         parent: None,
         folders,
         media: Vec::new(),
@@ -341,27 +425,33 @@ pub fn list_local_index_listing() -> ExternalListing {
     }
 }
 
+pub fn list_local_index_listing() -> ExternalListing {
+    list_index_listing("local")
+}
+
 pub fn list_browse_for_kind(
     path: Option<PathBuf>,
     kind: &str,
     media_limit: usize,
     media_offset: usize,
 ) -> Result<ExternalListing, String> {
-    if kind == "local" {
+    if index_kind_ok(kind) {
+        let virtual_root = virtual_root_for(kind);
         let target = match &path {
-            Some(p) if !p.as_os_str().is_empty() && !is_local_virtual_root(p) => p.clone(),
-            _ => PathBuf::from(LOCAL_VIRTUAL_ROOT),
+            Some(p) if !p.as_os_str().is_empty() && !is_kind_virtual_root(kind, p) => p.clone(),
+            _ => PathBuf::from(virtual_root),
         };
-        if is_local_virtual_root(&target) {
-            return Ok(list_local_index_listing());
+        if is_kind_virtual_root(kind, &target) {
+            return Ok(list_index_listing(kind));
         }
-        let safe = ensure_under_kind(&target, "local")?;
-        let bound = matching_local_root(&safe)
-            .ok_or_else(|| "不在已绑定的本地库索引内".to_string())?;
+        let safe = ensure_under_kind(&target, kind)?;
+        let bound = matching_index_root(kind, &safe).ok_or_else(|| {
+            format!("不在已绑定的{}索引内", index_kind_label(kind))
+        })?;
         let mut listing = list_external_dir(&safe, media_limit, media_offset, &bound)?;
-        listing.root = LOCAL_VIRTUAL_ROOT.to_string();
+        listing.root = virtual_root.to_string();
         if same_path(&safe, &bound) {
-            listing.parent = Some(LOCAL_VIRTUAL_ROOT.to_string());
+            listing.parent = Some(virtual_root.to_string());
         }
         return Ok(listing);
     }
@@ -661,6 +751,7 @@ pub fn copy_into_hub(paths: Vec<String>, dest_dir: Option<String>) -> Result<Hub
 pub fn root_for_kind(kind: &str) -> PathBuf {
     match kind {
         "local" => PathBuf::from(LOCAL_VIRTUAL_ROOT),
+        "volumes" => PathBuf::from(VOLUMES_VIRTUAL_ROOT),
         "hub" => default_hub_root(),
         _ => default_browse_root(),
     }
@@ -1184,18 +1275,21 @@ pub fn ensure_under_root(path: &Path, root: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn ensure_under_browse_root(path: &Path) -> Result<PathBuf, String> {
-    ensure_under_root(path, &default_browse_root())
+    if is_volumes_virtual_root(path) {
+        return Ok(PathBuf::from(VOLUMES_VIRTUAL_ROOT));
+    }
+    ensure_under_any_index_root("volumes", path)
 }
 
 pub fn ensure_under_kind(path: &Path, kind: &str) -> Result<PathBuf, String> {
     if kind == "hub" && !hub_is_bound() {
         return Err("尚未绑定中转站文件夹".into());
     }
-    if kind == "local" {
-        if is_local_virtual_root(path) {
-            return Ok(PathBuf::from(LOCAL_VIRTUAL_ROOT));
+    if index_kind_ok(kind) {
+        if is_kind_virtual_root(kind, path) {
+            return Ok(PathBuf::from(virtual_root_for(kind)));
         }
-        return ensure_under_any_local_root(path);
+        return ensure_under_any_index_root(kind, path);
     }
     let root = root_for_kind(kind);
     if kind == "hub" && root.as_os_str().is_empty() {
@@ -1205,7 +1299,7 @@ pub fn ensure_under_kind(path: &Path, kind: &str) -> Result<PathBuf, String> {
 }
 
 pub fn ensure_readable(path: &Path) -> Result<PathBuf, String> {
-    if let Ok(p) = ensure_under_browse_root(path) {
+    if let Ok(p) = ensure_under_kind(path, "volumes") {
         return Ok(p);
     }
     if let Ok(p) = ensure_under_kind(path, "local") {
@@ -1479,5 +1573,37 @@ mod tests {
         let left = remove_local_index_root(&a).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].path, b.canonicalize().unwrap().display().to_string());
+    }
+
+    #[test]
+    fn volume_index_roots_bind_multiple_and_do_not_default_volumes() {
+        let dir = tempdir().unwrap();
+        let cfg = dir.path().join("volume-roots.json");
+        std::env::set_var("INSPIREX_VOLUME_ROOTS_CONFIG", &cfg);
+        std::env::remove_var("INSPIREX_BROWSE_ROOT");
+
+        let empty = list_index_listing("volumes");
+        assert!(empty.folders.is_empty());
+        assert_eq!(empty.path, VOLUMES_VIRTUAL_ROOT);
+
+        let a = dir.path().join("disk-a");
+        let b = dir.path().join("disk-b");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(a.join("x.png"), b"x").unwrap();
+
+        assert_eq!(add_index_root("volumes", &a).unwrap().len(), 1);
+        assert_eq!(add_index_root("volumes", &b).unwrap().len(), 2);
+
+        let listing = list_browse_for_kind(None, "volumes", 72, 0).unwrap();
+        assert_eq!(listing.path, VOLUMES_VIRTUAL_ROOT);
+        assert_eq!(listing.folders.len(), 2);
+
+        let inner = list_browse_for_kind(Some(a.clone()), "volumes", 72, 0).unwrap();
+        assert_eq!(inner.media.len(), 1);
+        assert_eq!(inner.parent.as_deref(), Some(VOLUMES_VIRTUAL_ROOT));
+
+        assert!(ensure_under_kind(Path::new("/Volumes"), "volumes").is_err());
+        assert_eq!(remove_index_root("volumes", &a).unwrap().len(), 1);
     }
 }

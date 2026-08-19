@@ -12,6 +12,7 @@ ok() { echo "OK: $*"; }
 [[ -f ADR/002-source-adapters.md ]] || fail "缺少 ADR-002"
 [[ -f ADR/003-source-link-no-copy.md ]] || fail "缺少 ADR-003"
 [[ -f ADR/005-hub-cloud-folder.md ]] || fail "缺少 ADR-005"
+[[ -f ADR/006-browser-primary-ui.md ]] || fail "缺少 ADR-006"
 [[ -f src-tauri/Cargo.toml ]] || fail "缺少 src-tauri"
 
 if [[ ! -f .env ]]; then
@@ -83,7 +84,11 @@ ok "bridge fallback"
 if curl -sf --max-time 2 "http://127.0.0.1:${INSPIREX_INGEST_PORT:-18765}/health" >/dev/null; then
   curl -sf --max-time 2 "http://127.0.0.1:${INSPIREX_INGEST_PORT:-18765}/v1/browse/root?kind=volumes" >/dev/null \
     || fail "ingest 已启动但 /v1/browse/root 失败"
-  ok "ingest browse root"
+  curl -sf --max-time 2 -X POST "http://127.0.0.1:${INSPIREX_INGEST_PORT:-18765}/v1/invoke" \
+    -H "Content-Type: application/json" \
+    -d '{"cmd":"get_library_info","args":{}}' >/dev/null \
+    || fail "ingest 已启动但 /v1/invoke 失败"
+  ok "ingest browse + invoke"
 else
   echo "SKIP: ingest 未在监听（未 start.sh 时正常）"
 fi

@@ -164,19 +164,26 @@ function browseRootOf(
 }
 
 const LOCAL_VIRTUAL = "inspirex://local";
+const VOLUMES_VIRTUAL = "inspirex://volumes";
 
-function isLocalVirtualPath(path: string | null | undefined, localRoot: string): boolean {
-  if (!path) return true;
-  return path === localRoot || path === LOCAL_VIRTUAL || path.startsWith("inspirex://");
+function virtualRootOf(kind: BrowseKind): string {
+  if (kind === "local") return LOCAL_VIRTUAL;
+  if (kind === "volumes") return VOLUMES_VIRTUAL;
+  return "";
 }
 
-function localBoundRootOf(
+function isKindVirtualPath(path: string | null | undefined, virtual: string): boolean {
+  if (!path) return true;
+  return path === virtual;
+}
+
+function boundRootOf(
   browsePath: string | null,
-  localRoots: PinnedFolder[],
-  localRoot: string,
+  roots: PinnedFolder[],
+  virtual: string,
 ): string | null {
-  if (!browsePath || isLocalVirtualPath(browsePath, localRoot)) return null;
-  const hit = localRoots.find((r) => {
+  if (!browsePath || isKindVirtualPath(browsePath, virtual)) return null;
+  const hit = roots.find((r) => {
     const root = r.path.replace(/\/$/, "");
     return browsePath === root || browsePath.startsWith(`${root}/`);
   });
@@ -189,7 +196,6 @@ const FINDER_HIDDEN_KEY = "inspirex.finderHiddenTags";
 const PINNED_FOLDERS_KEY = "inspirex.pinnedFolders";
 const BROWSE_PAGE_SIZE = 72;
 const THUMB_MAX_CONCURRENCY = 4;
-const SUGGESTED_FOLDERS = ["好内容图", "素材库", "家庭视频", "产品设计"];
 const FINDER_PALETTE: FinderTag[] = [
   { name: "红色", color: 6, hex: "#FF5F57" },
   { name: "橙色", color: 7, hex: "#FEBC2E" },
@@ -219,14 +225,6 @@ function displayFolderName(name: string): string {
     return name.replace(/\.photoslibrary$/i, "");
   }
   return name;
-}
-
-function volumeRootOf(browsePath: string | null, browseRoot: string): string | null {
-  const root = browseRoot.replace(/\/$/, "");
-  if (!browsePath || browsePath === root || browsePath === `${root}/`) return null;
-  if (!browsePath.startsWith(`${root}/`)) return null;
-  const vol = browsePath.slice(root.length + 1).split("/")[0];
-  return vol ? `${root}/${vol}` : null;
 }
 
 type ThumbJob = {
@@ -532,7 +530,8 @@ export default function App() {
   const [genFilterId, setGenFilterId] = useState<string | null>(null);
 
   const [browseKind, setBrowseKind] = useState<BrowseKind>("volumes");
-  const [volumesRoot, setVolumesRoot] = useState("/Volumes");
+  const [volumesRoot, setVolumesRoot] = useState(VOLUMES_VIRTUAL);
+  const [volumeRoots, setVolumeRoots] = useState<PinnedFolder[]>([]);
   const [localRoot, setLocalRoot] = useState(LOCAL_VIRTUAL);
   const [localRoots, setLocalRoots] = useState<PinnedFolder[]>([]);
   const [hubRoot, setHubRoot] = useState("");
@@ -648,23 +647,23 @@ export default function App() {
   );
 
   const volumeRoot = useMemo(
-    () => volumeRootOf(browsePath, browseRoot),
-    [browsePath, browseRoot],
+    () => boundRootOf(browsePath, volumeRoots, volumesRoot || VOLUMES_VIRTUAL),
+    [browsePath, volumeRoots, volumesRoot],
   );
 
   const localBoundRoot = useMemo(
-    () => (browseKind === "local" ? localBoundRootOf(browsePath, localRoots, localRoot) : null),
+    () => (browseKind === "local" ? boundRootOf(browsePath, localRoots, localRoot || LOCAL_VIRTUAL) : null),
     [browseKind, browsePath, localRoots, localRoot],
   );
 
-  const sourceNavRoot = browseKind === "local" ? localBoundRoot : volumeRoot;
+  const sourceNavRoot =
+    browseKind === "local" ? localBoundRoot : browseKind === "volumes" ? volumeRoot : null;
 
   const suggestedVisible = useMemo(() => {
     const items: PinnedFolder[] = [];
-    if (browseKind === "volumes" && volumeRoot) {
-      for (const name of SUGGESTED_FOLDERS) {
-        const path = `${volumeRoot}/${name}`;
-        if (!sidebarHidden.has(path)) items.push({ name, path });
+    if (browseKind === "volumes") {
+      for (const r of volumeRoots) {
+        if (!sidebarHidden.has(r.path)) items.push(r);
       }
     }
     if (browseKind === "local") {
@@ -678,7 +677,7 @@ export default function App() {
       items.push(p);
     }
     return items;
-  }, [browseKind, volumeRoot, localRoots, sidebarHidden, pinnedFolders]);
+  }, [browseKind, volumeRoots, localRoots, sidebarHidden, pinnedFolders]);
 
   const visibleFinderTags = useMemo(() => {
     const seen = new Set<string>();
@@ -884,13 +883,14 @@ export default function App() {
         return { ...data, path: target };
       });
       setBrowseError(null);
-      const atLocalVirtual =
-        browseKind === "local" && isLocalVirtualPath(target, root || LOCAL_VIRTUAL);
+      const atIndexVirtual =
+        (browseKind === "local" && isKindVirtualPath(target, root || LOCAL_VIRTUAL)) ||
+        (browseKind === "volumes" && isKindVirtualPath(target, root || VOLUMES_VIRTUAL));
       setStatus(
-        (tag ? `标签 · ${tag} · ` : atLocalVirtual
-          ? `本地库 · ${data.folders.length} 个索引目录`
+        (tag ? `标签 · ${tag} · ` : atIndexVirtual
+          ? `${sourceLabel} · ${data.folders.length} 个索引目录`
           : `${sourceLabel} · ${target} · `) +
-          (atLocalVirtual && !tag
+          (atIndexVirtual && !tag
             ? ""
             : `${data.folders.length} 文件夹 · ${data.totalMedia} 媒体`) +
           (data.truncated || shown < data.totalMedia
@@ -1006,19 +1006,23 @@ export default function App() {
       .catch((e) => setStatus(String(e)));
     invoke<string>("get_browse_root", { kind: "volumes" })
       .then((r) => {
-        setVolumesRoot(r);
-        setBrowsePath((cur) => cur ?? r);
+        const root = r || VOLUMES_VIRTUAL;
+        setVolumesRoot(root);
+        setBrowsePath((cur) => cur ?? root);
       })
       .catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
-        setBrowsePath((cur) => cur ?? "/Volumes");
+        setBrowsePath((cur) => cur ?? VOLUMES_VIRTUAL);
         setBrowseError(msg);
         setStatus(`浏览根目录失败: ${msg}`);
       });
+    invoke<PinnedFolder[]>("list_index_roots", { kind: "volumes" })
+      .then(setVolumeRoots)
+      .catch(() => undefined);
     invoke<string>("get_browse_root", { kind: "local" })
       .then((r) => setLocalRoot(r || LOCAL_VIRTUAL))
       .catch(() => setLocalRoot(LOCAL_VIRTUAL));
-    invoke<PinnedFolder[]>("list_local_roots")
+    invoke<PinnedFolder[]>("list_index_roots", { kind: "local" })
       .then(setLocalRoots)
       .catch(() => undefined);
     invoke<HubStatus>("get_hub_status")
@@ -1095,7 +1099,7 @@ export default function App() {
     }
   };
 
-  const bindLocalIndexFromPath = async (rawPath: string) => {
+  const bindIndexFromPath = async (kind: "local" | "volumes", rawPath: string) => {
     const path = rawPath.trim();
     if (!path) {
       setStatus("请填写要绑定的文件夹绝对路径");
@@ -1103,40 +1107,44 @@ export default function App() {
     }
     setBusy(true);
     try {
-      const roots = await invoke<PinnedFolder[]>("add_local_root", { path });
-      setLocalRoots(roots);
+      const roots = await invoke<PinnedFolder[]>("add_index_root", { kind, path });
+      if (kind === "local") setLocalRoots(roots);
+      else setVolumeRoots(roots);
       setPathAsk(null);
       setMode("browse");
-      setBrowseKind("local");
+      setBrowseKind(kind);
       setViewFolderId(null);
       setSelected(null);
       setPicked(null);
       setTagFilter(null);
-      const virtual = localRoot || LOCAL_VIRTUAL;
+      const virtual = virtualRootOf(kind);
+      if (kind === "local") setLocalRoot(virtual);
+      else setVolumesRoot(virtual);
       setBrowsePath(virtual);
       const name = folderNameFromPath(path);
-      console.info("[inspirex]", { event: "local_root_add", path, count: roots.length });
-      setStatus(`已绑定索引「${name}」· 共 ${roots.length} 个（不复制原文件）`);
+      console.info("[inspirex]", { event: "index_root_add", kind, path, count: roots.length });
+      setStatus(`已绑定${kind === "local" ? "本地库" : "外置卷"}索引「${name}」· 共 ${roots.length} 个（不复制原文件）`);
       await refreshBrowse(virtual);
     } catch (e) {
-      setStatus(`绑定本地库索引失败: ${e}`);
+      setStatus(`绑定索引失败: ${e}`);
     } finally {
       setBusy(false);
     }
   };
 
-  const unbindLocalIndex = async (path: string, name: string) => {
+  const unbindIndex = async (kind: "local" | "volumes", path: string, name: string) => {
     try {
-      const roots = await invoke<PinnedFolder[]>("remove_local_root", { path });
-      setLocalRoots(roots);
+      const roots = await invoke<PinnedFolder[]>("remove_index_root", { kind, path });
+      if (kind === "local") setLocalRoots(roots);
+      else setVolumeRoots(roots);
+      const virtual = virtualRootOf(kind);
       if (browsePath === path || browsePath?.startsWith(`${path.replace(/\/$/, "")}/`)) {
-        const virtual = localRoot || LOCAL_VIRTUAL;
         setBrowsePath(virtual);
       }
-      console.info("[inspirex]", { event: "local_root_remove", path, count: roots.length });
+      console.info("[inspirex]", { event: "index_root_remove", kind, path, count: roots.length });
       setStatus(`已解除索引「${name}」（原文件未删）`);
-      if (browseKind === "local") {
-        await refreshBrowse(localRoot || LOCAL_VIRTUAL);
+      if (browseKind === kind) {
+        await refreshBrowse(virtual);
       }
     } catch (e) {
       setStatus(`解除索引失败: ${e}`);
@@ -1152,8 +1160,8 @@ export default function App() {
     const name = folderNameFromPath(path);
     console.info("[inspirex]", { event: "add_folder", mode, browseKind, path });
 
-    if (mode === "browse" && browseKind === "local") {
-      await bindLocalIndexFromPath(path);
+    if (mode === "browse" && (browseKind === "local" || browseKind === "volumes")) {
+      await bindIndexFromPath(browseKind, path);
       return;
     }
 
@@ -1340,8 +1348,8 @@ export default function App() {
         if (pickedDir.reason === "need-path") {
           setPathAsk("folder");
           setPathDraft(
-            browseKind === "local"
-              ? localBoundRoot || ""
+            browseKind === "local" || browseKind === "volumes"
+              ? sourceNavRoot || ""
               : browsePath && !browsePath.startsWith("inspirex://")
                 ? browsePath
                 : browseRoot,
@@ -1349,7 +1357,9 @@ export default function App() {
           setStatus(
             browseKind === "local"
               ? "请填写要绑定到本地库的文件夹绝对路径"
-              : "桌面对话框不可用，请确认或粘贴文件夹绝对路径",
+              : browseKind === "volumes"
+                ? "请填写要绑定到外置卷的文件夹绝对路径"
+                : "桌面对话框不可用，请确认或粘贴文件夹绝对路径",
           );
         }
         return;
@@ -1948,11 +1958,12 @@ export default function App() {
 
   const crumb = useMemo(() => {
     if (!browsePath) return [];
-    if (browseKind === "local") {
-      const virtual = localRoot || LOCAL_VIRTUAL;
-      const items = [{ name: "本地库", path: virtual }];
-      if (isLocalVirtualPath(browsePath, virtual)) return items;
-      const bound = localRoots.find((r) => {
+    if (browseKind === "local" || browseKind === "volumes") {
+      const virtual = browseKind === "local" ? localRoot || LOCAL_VIRTUAL : volumesRoot || VOLUMES_VIRTUAL;
+      const roots = browseKind === "local" ? localRoots : volumeRoots;
+      const items = [{ name: sourceLabel, path: virtual }];
+      if (isKindVirtualPath(browsePath, virtual)) return items;
+      const bound = roots.find((r) => {
         const root = r.path.replace(/\/$/, "");
         return browsePath === root || browsePath.startsWith(`${root}/`);
       });
@@ -1979,7 +1990,7 @@ export default function App() {
       items.push({ name: displayFolderName(p), path: acc });
     }
     return items;
-  }, [browsePath, browseRoot, browseKind, sourceLabel, localRoot, localRoots]);
+  }, [browsePath, browseRoot, browseKind, sourceLabel, localRoot, localRoots, volumesRoot, volumeRoots]);
 
   const headerMeta = useMemo(() => {
     if (viewFolderId) {
@@ -2063,9 +2074,9 @@ export default function App() {
             setSelected(null);
             setPicked(null);
             if (browseKind === "volumes" && browsePath === volumesRoot) {
-              refreshBrowse(volumesRoot).catch((e) => setStatus(String(e)));
+              refreshBrowse(volumesRoot || VOLUMES_VIRTUAL).catch((e) => setStatus(String(e)));
             } else {
-              setBrowsePath(volumesRoot);
+              setBrowsePath(volumesRoot || VOLUMES_VIRTUAL);
             }
           }}
         >
@@ -2187,17 +2198,25 @@ export default function App() {
             {suggestedVisible.length > 0 || mode === "browse" ? (
               <>
                 <div className="nav-label">
-                  {browseKind === "local" ? "索引目录" : "常用"}
+                  {browseKind === "local" || browseKind === "volumes" ? "索引目录" : "常用"}
                   <button
                     type="button"
                     className="linkish"
-                    title={browseKind === "local" ? "绑定要索引的本机文件夹" : "追加要展示的文件夹"}
+                    title={
+                      browseKind === "local" || browseKind === "volumes"
+                        ? "绑定要索引的文件夹"
+                        : "追加要展示的文件夹"
+                    }
                     onClick={onAddDisplayFolder}
                   >
                     +
                   </button>
                 </div>
-                {suggestedVisible.map((p) => (
+                {suggestedVisible.map((p) => {
+                  const indexed =
+                    (browseKind === "local" && localRoots.some((r) => r.path === p.path)) ||
+                    (browseKind === "volumes" && volumeRoots.some((r) => r.path === p.path));
+                  return (
                   <div
                     key={p.path}
                     className={`nav-row ${browsePath === p.path ? "active" : ""}`}
@@ -2208,7 +2227,7 @@ export default function App() {
                       onClick={() => {
                         setViewFolderId(null);
                         setTagFilter(null);
-                        if (p.path.startsWith(volumesRoot.replace(/\/$/, "") + "/") || p.path === volumesRoot) {
+                        if (volumeRoots.some((r) => p.path === r.path || p.path.startsWith(r.path.replace(/\/$/, "") + "/"))) {
                           setBrowseKind("volumes");
                         } else if (hubRoot && (p.path === hubRoot || p.path.startsWith(hubRoot.replace(/\/$/, "") + "/"))) {
                           setBrowseKind("hub");
@@ -2223,16 +2242,16 @@ export default function App() {
                     <button
                       type="button"
                       className="nav-del"
-                      title={
-                        browseKind === "local" && localRoots.some((r) => r.path === p.path)
-                          ? "解除本地库索引（不删原文件）"
-                          : "从侧栏隐藏（不删原文件）"
-                      }
+                      title={indexed ? "解除索引（不删原文件）" : "从侧栏隐藏（不删原文件）"}
                       aria-label={`隐藏 ${p.name}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         if (browseKind === "local" && localRoots.some((r) => r.path === p.path)) {
-                          unbindLocalIndex(p.path, p.name).catch(() => undefined);
+                          unbindIndex("local", p.path, p.name).catch(() => undefined);
+                          return;
+                        }
+                        if (browseKind === "volumes" && volumeRoots.some((r) => r.path === p.path)) {
+                          unbindIndex("volumes", p.path, p.name).catch(() => undefined);
                           return;
                         }
                         hideFromSidebar(p.path, p.name);
@@ -2241,13 +2260,14 @@ export default function App() {
                       ×
                     </button>
                   </div>
-                ))}
+                  );
+                })}
               </>
             ) : null}
-            {!sourceNavRoot && !tagFilter && browseKind !== "local" ? (
+            {!sourceNavRoot && !tagFilter && browseKind !== "local" && browseKind !== "volumes" ? (
               <>
                 <div className="nav-label">
-                  {browseKind === "local" ? "本机目录" : browseKind === "hub" ? "中转站目录" : "已挂载"}
+                  {browseKind === "hub" ? "中转站目录" : "已挂载"}
                   {sidebarHidden.size > 0 ? (
                     <button
                       type="button"
@@ -2507,8 +2527,8 @@ export default function App() {
                       复制到中转站
                     </button>
                   ) : null}
-                  <button type="button" onClick={onAddDisplayFolder} disabled={busy} title={browseKind === "local" ? "绑定本机文件夹到本地库（可多个，只索引不复制）" : "把文件夹加到侧栏常用"}>
-                    {browseKind === "local" ? "追加文件夹" : "追加文件夹"}
+                  <button type="button" onClick={onAddDisplayFolder} disabled={busy} title={browseKind === "local" || browseKind === "volumes" ? "绑定文件夹到当前来源（可多个，只索引不复制）" : "把文件夹加到侧栏常用"}>
+                    追加文件夹
                   </button>
                   <button
                     type="button"
@@ -2532,7 +2552,9 @@ export default function App() {
                   pathAsk === "folder"
                     ? browseKind === "local"
                       ? "要绑定的文件夹绝对路径，例如 /Users/me/Pictures"
-                      : "文件夹绝对路径，例如 /Volumes/Q-V-P/素材"
+                      : browseKind === "volumes"
+                        ? "外置卷上的文件夹，例如 /Volumes/Lexar/素材"
+                        : "文件夹绝对路径，例如 /Volumes/Q-V-P/素材"
                     : pathAsk === "hub"
                       ? "云同步文件夹路径，例如 iCloud 云盘/InspireX-Hub"
                       : "文件绝对路径，逗号或换行分隔"
@@ -2711,12 +2733,16 @@ export default function App() {
                 <p>
                   {tagFilter
                     ? `没有带「${tagFilter}」标签的图片/视频。`
-                    : volumeRoot
+                    : sourceNavRoot
                       ? "此目录下没有图片/视频（可能是空文件夹）。"
                       : browseKind === "local"
                         ? localRoots.length === 0
                           ? "还没有绑定索引目录。"
                           : "本机索引目录下没有可显示的内容。"
+                        : browseKind === "volumes"
+                          ? volumeRoots.length === 0
+                            ? "还没有绑定外置卷索引。"
+                            : "外置卷索引目录下没有可显示的内容。"
                         : browseKind === "hub"
                           ? "中转站还是空的。"
                           : "未检测到外接存储。"}
@@ -2724,10 +2750,12 @@ export default function App() {
                 <p className="hint">
                   {tagFilter
                     ? "勾选文件后点侧栏标签旁的 +，即可像 Finder 一样贴上标签。"
-                    : volumeRoot
+                    : sourceNavRoot
                       ? "只展示来源文件，不另存副本。标签在左侧，与 Finder 相同。"
                       : browseKind === "local"
                         ? "点右上角「追加文件夹」，绑定照片、图片、影片等本机目录。只做索引，不复制原文件。"
+                        : browseKind === "volumes"
+                          ? "点右上角「追加文件夹」，绑定移动硬盘或 U 盘上的素材目录。只做索引，不复制原文件。"
                         : browseKind === "hub"
                           ? "点「存入」或把图片拖进这里，云盘会同步到其他设备。"
                           : "插入 U 盘、移动硬盘或挂载网络卷后点刷新。"}
@@ -2737,7 +2765,7 @@ export default function App() {
                     存入图片
                   </button>
                 ) : null}
-                {browseKind === "local" && !tagFilter ? (
+                {(browseKind === "local" || browseKind === "volumes") && !tagFilter ? (
                   <button type="button" className="primary" onClick={onAddDisplayFolder} disabled={busy}>
                     追加文件夹
                   </button>

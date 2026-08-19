@@ -43,4 +43,23 @@ if (vite[0] !== "") {
   process.exit(1);
 }
 
+function httpSpec(cmd, args) {
+  return {
+    method: "POST",
+    path: "/v1/invoke",
+    body: JSON.stringify({ cmd, args: args ?? {} }),
+  };
+}
+
+const spec = httpSpec("create_tag", { name: "红", color: "#FF5F57" });
+if (spec.path !== "/v1/invoke" || spec.method !== "POST") {
+  console.error("FAIL: 命令应走 /v1/invoke", spec);
+  process.exit(1);
+}
+const body = JSON.parse(spec.body);
+if (body.cmd !== "create_tag" || body.args.name !== "红") {
+  console.error("FAIL: invoke 体", body);
+  process.exit(1);
+}
+
 console.log("OK: bridge fallback rules");

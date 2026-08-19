@@ -169,7 +169,7 @@ async function httpInvoke<T>(cmd: string, args?: object): Promise<T> {
     break;
   }
   throw new Error(
-    `桌面桥未就绪（${errors.join(" · ")}）。请用 ./scripts/start.sh 打开灵犀窗口。`,
+    `桌面桥未就绪（${errors.join(" · ")}）。请用 ./scripts/start.sh 启动本机后端，浏览器打开 http://127.0.0.1:1420。`,
   );
 }
 

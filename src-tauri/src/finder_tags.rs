@@ -1,7 +1,7 @@
 //! macOS Finder 标签（kMDItemUserTags）：侧栏色点、筛选、贴到文件。
 
 use crate::browse::{
-    default_browse_root, default_local_root, ensure_readable, item_from_path, ExternalKind,
+    default_local_root, ensure_readable, item_from_path, ExternalKind,
     ExternalListing,
 };
 use serde::{Deserialize, Serialize};
@@ -291,9 +291,8 @@ fn path_under(path: &Path, root: &Path) -> bool {
 }
 
 pub fn tag_scope_for(path: &Path) -> PathBuf {
-    let vol = default_browse_root();
-    if path_under(path, &vol) {
-        return first_level_under(path, &vol);
+    if let Some(root) = crate::browse::matching_index_root("volumes", path) {
+        return root;
     }
     let hub = crate::browse::default_hub_root();
     if !hub.as_os_str().is_empty() && path_under(path, &hub) {
