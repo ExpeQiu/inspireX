@@ -62,4 +62,27 @@ if (body.cmd !== "create_tag" || body.args.name !== "红") {
   process.exit(1);
 }
 
+function browseThumbPath(filePath, maxSide = 240) {
+  return `/v1/browse/thumb?path=${encodeURIComponent(filePath)}&maxSide=${maxSide}`;
+}
+function ingestMediaUrl(origin, port, pathAndQuery) {
+  if (origin && isLocalHttpOrigin(origin)) return pathAndQuery;
+  return `http://127.0.0.1:${port}${pathAndQuery}`;
+}
+const thumb = browseThumbPath("/Volumes/Q-V-P/a.jpg", 240);
+if (!thumb.startsWith("/v1/browse/thumb?") || !thumb.includes("maxSide=240")) {
+  console.error("FAIL: thumb path", thumb);
+  process.exit(1);
+}
+const localThumb = ingestMediaUrl("http://localhost:1420", "18765", thumb);
+if (localThumb !== thumb) {
+  console.error("FAIL: Vite 页缩略图应 same-origin", localThumb);
+  process.exit(1);
+}
+const remoteThumb = ingestMediaUrl("vscode-webview://x", "18765", thumb);
+if (!remoteThumb.startsWith("http://127.0.0.1:18765/v1/browse/thumb")) {
+  console.error("FAIL: webview 缩略图应走 ingest", remoteThumb);
+  process.exit(1);
+}
+
 console.log("OK: bridge fallback rules");

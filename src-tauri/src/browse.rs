@@ -52,6 +52,8 @@ const SYSTEM_VOLUME_NAMES: &[&str] = &[
     "Hardware",
 ];
 
+const PICKER_MEDIA_CAP: usize = 400;
+
 const LOCAL_SKIP_NAMES: &[&str] = &[
     "Library",
     "Applications",
@@ -606,13 +608,21 @@ pub fn picker_root_for(kind: &str) -> PathBuf {
     }
 }
 
-pub fn list_picker_dir(path: Option<&Path>, kind: &str) -> Result<ExternalListing, String> {
+pub fn list_picker_dir(
+    path: Option<&Path>,
+    kind: &str,
+    include_media: bool,
+) -> Result<ExternalListing, String> {
     let root = picker_root_for(kind);
-    list_picker_dir_under(path, &root)
+    list_picker_dir_under(path, &root, include_media)
 }
 
-/// 只列子文件夹，供绑定索引 / 导入时挑选目录（不受已绑定索引约束）。
-pub fn list_picker_dir_under(path: Option<&Path>, root: &Path) -> Result<ExternalListing, String> {
+/// 列子文件夹；`include_media` 时同时列当前目录图片（选参考图）。
+pub fn list_picker_dir_under(
+    path: Option<&Path>,
+    root: &Path,
+    include_media: bool,
+) -> Result<ExternalListing, String> {
     let target = match path {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => root.to_path_buf(),
@@ -623,7 +633,7 @@ pub fn list_picker_dir_under(path: Option<&Path>, root: &Path) -> Result<Externa
         let parent = safe.parent().map(|p| p.display().to_string());
         log::info!(
             target: "inspirex",
-            "picker_list path={} root={} photos_library=1 folders=0",
+            "picker_list path={} root={} photos_library=1 folders=0 media=0",
             safe.display(),
             root.display()
         );
@@ -648,6 +658,8 @@ pub fn list_picker_dir_under(path: Option<&Path>, root: &Path) -> Result<Externa
         .unwrap_or_else(|_| root.to_path_buf());
     let at_root = same_path(&safe, root);
     let mut folders = Vec::new();
+    let mut media = Vec::new();
+    let mut truncated = false;
 
     let mut entries: Vec<_> = std::fs::read_dir(&safe)
         .map_err(|e| format!("无法读取 {}: {e}", safe.display()))?
@@ -666,6 +678,17 @@ pub fn list_picker_dir_under(path: Option<&Path>, root: &Path) -> Result<Externa
             .map(|t| t.is_dir())
             .unwrap_or_else(|_| p.is_dir());
         if !is_dir {
+            if include_media {
+                if let Some(item) = item_from_path(&p) {
+                    if matches!(item.kind, ExternalKind::Image) {
+                        if media.len() < PICKER_MEDIA_CAP {
+                            media.push(item);
+                        } else {
+                            truncated = true;
+                        }
+                    }
+                }
+            }
             continue;
         }
         if is_volumes_dir(&safe) && skip_volume_entry(&p, &name) {
@@ -709,12 +732,15 @@ pub fn list_picker_dir_under(path: Option<&Path>, root: &Path) -> Result<Externa
             .map(|p| p.display().to_string())
     };
 
+    let total_media = media.len();
     log::info!(
         target: "inspirex",
-        "picker_list path={} root={} folders={} parent={} ms={}",
+        "picker_list path={} root={} folders={} media={} truncated={} parent={} ms={}",
         safe.display(),
         root.display(),
         folders.len(),
+        total_media,
+        truncated,
         parent.as_deref().unwrap_or(""),
         t0.elapsed().as_millis()
     );
@@ -724,9 +750,9 @@ pub fn list_picker_dir_under(path: Option<&Path>, root: &Path) -> Result<Externa
         path: safe.display().to_string(),
         parent,
         folders,
-        media: Vec::new(),
-        truncated: false,
-        total_media: 0,
+        media,
+        truncated,
+        total_media,
     })
 }
 
@@ -1582,6 +1608,26 @@ pub fn ensure_readable(path: &Path) -> Result<PathBuf, String> {
     ))
 }
 
+/// 选参考图等：家目录 / 外置卷沙箱内的图片、视频可预览（不要求已绑定索引）。
+pub fn ensure_picker_media(path: &Path) -> Result<PathBuf, String> {
+    let path_c = path
+        .canonicalize()
+        .map_err(|e| format!("路径不可用 {}: {e}", path.display()))?;
+    if !is_media(&path_c) {
+        return Err(format!("不是图片或视频: {}", path.display()));
+    }
+    for kind in ["local", "volumes"] {
+        let root = picker_root_for(kind);
+        if ensure_under_root(&path_c, &root).is_ok() {
+            return Ok(path_c);
+        }
+    }
+    Err(format!(
+        "仅允许预览家目录或外置卷中的图片，收到: {}",
+        path.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1882,7 +1928,7 @@ mod tests {
         fs::create_dir(dir.path().join(".hidden")).unwrap();
         fs::write(dir.path().join("a.png"), b"x").unwrap();
 
-        let listing = list_picker_dir_under(None, dir.path()).unwrap();
+        let listing = list_picker_dir_under(None, dir.path(), false).unwrap();
         let names: Vec<_> = listing.folders.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"Pictures"));
         assert!(names.contains(&"Movies"));
@@ -1891,6 +1937,11 @@ mod tests {
         assert!(!names.contains(&"a.png"));
         assert!(listing.media.is_empty());
         assert!(listing.parent.is_none());
+
+        let with_files = list_picker_dir_under(None, dir.path(), true).unwrap();
+        assert_eq!(with_files.folders.len(), listing.folders.len());
+        assert_eq!(with_files.media.len(), 1);
+        assert_eq!(with_files.media[0].name, "a.png");
     }
 
     #[test]
@@ -1899,12 +1950,34 @@ mod tests {
         fs::create_dir(dir.path().join("Pictures")).unwrap();
         fs::create_dir(dir.path().join("Pictures").join("album")).unwrap();
 
-        let inner = list_picker_dir_under(Some(&dir.path().join("Pictures")), dir.path()).unwrap();
+        let inner = list_picker_dir_under(Some(&dir.path().join("Pictures")), dir.path(), false).unwrap();
         assert!(inner.parent.is_some());
         assert!(inner.folders.iter().any(|f| f.name == "album"));
 
-        let err = list_picker_dir_under(Some(Path::new("/tmp")), dir.path()).unwrap_err();
+        let err = list_picker_dir_under(Some(Path::new("/tmp")), dir.path(), false).unwrap_err();
         assert!(err.contains("仅允许浏览"));
+    }
+
+    #[test]
+    fn picker_media_allows_image_under_home_or_rejects_outside() {
+        let dir = tempdir().unwrap();
+        let png = dir.path().join("ref.png");
+        fs::write(&png, b"x").unwrap();
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users"));
+        if png.starts_with(&home) {
+            let got = ensure_picker_media(&png).unwrap();
+            assert_eq!(got.file_name().unwrap(), "ref.png");
+        } else {
+            let err = ensure_picker_media(&png).unwrap_err();
+            assert!(
+                err.contains("仅允许预览") || err.contains("仅允许浏览"),
+                "{err}"
+            );
+        }
+        let txt = dir.path().join("notes.txt");
+        fs::write(&txt, b"x").unwrap();
+        let err = ensure_picker_media(&txt).unwrap_err();
+        assert!(err.contains("不是图片"), "{err}");
     }
 
     #[test]

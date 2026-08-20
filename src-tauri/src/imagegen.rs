@@ -15,20 +15,9 @@ const MINIMAX_PROMPT_MAX: usize = 1500;
 const MINIMAX_DEFAULT_BASE: &str = "https://api.minimaxi.com";
 const MINIMAX_DEFAULT_MODEL: &str = "image-01";
 
-pub fn effective_provider(state: &AppState) -> &str {
-    let p = state.image_gen_provider.trim();
-    if p.is_empty() || p.eq_ignore_ascii_case("mock") {
-        return "mock";
-    }
-    if state.image_gen_api_key.trim().is_empty() {
-        log::warn!(
-            target: "inspirex",
-            "image_gen_no_key provider={} → mock",
-            p
-        );
-        return "mock";
-    }
-    p
+pub fn effective_provider(state: &AppState) -> String {
+    let ep = state.ai_image();
+    crate::aisettings::effective_of(&ep.provider, &ep.api_key)
 }
 
 fn http_agent() -> ureq::Agent {
@@ -45,8 +34,9 @@ pub fn generate(state: &AppState, req: GenerateRequest) -> Result<GenJob, String
     let n = req.n.unwrap_or(1).clamp(1, 8);
     let size = req.size.unwrap_or_else(|| "1024x1024".into());
     let (w, h) = parse_size(&size);
-    let provider = effective_provider(state).to_string();
-    let model = default_model(state, &provider);
+    let ep = state.ai_image();
+    let provider = crate::aisettings::effective_of(&ep.provider, &ep.api_key);
+    let model = default_model(&ep.model, &provider);
 
     let now = chrono::Utc::now().to_rfc3339();
     let mut job = GenJob {
@@ -185,8 +175,8 @@ pub fn import_job(
     Ok(job)
 }
 
-fn default_model(state: &AppState, provider: &str) -> String {
-    let configured = state.image_gen_model.trim();
+fn default_model(configured: &str, provider: &str) -> String {
+    let configured = configured.trim();
     if !configured.is_empty() {
         return configured.to_string();
     }
@@ -371,7 +361,8 @@ fn minimax_files(
     h: u32,
     model: &str,
 ) -> Result<Vec<String>, String> {
-    let url = minimax_endpoint(&state.image_gen_base_url);
+    let ep = state.ai_image();
+    let url = minimax_endpoint(&ep.base_url);
     let prompt: String = prompt.chars().take(MINIMAX_PROMPT_MAX).collect();
     let width = align_minimax_px(w);
     let height = align_minimax_px(h);
@@ -398,7 +389,7 @@ fn minimax_files(
         .post(&url)
         .set(
             "Authorization",
-            &format!("Bearer {}", state.image_gen_api_key.trim()),
+            &format!("Bearer {}", ep.api_key.trim()),
         )
         .set("Content-Type", "application/json")
         .send_json(body)
@@ -449,9 +440,10 @@ fn openai_compat_files(
     size: &str,
     model: &str,
 ) -> Result<Vec<String>, String> {
-    let base = state.image_gen_base_url.trim().trim_end_matches('/');
+    let ep = state.ai_image();
+    let base = ep.base_url.trim().trim_end_matches('/');
     if base.is_empty() {
-        return Err("IMAGE_GEN_BASE_URL 未配置".into());
+        return Err("图片服务 Base URL 未配置，请在设置中填写".into());
     }
     let url = if base.ends_with("/images/generations") {
         base.to_string()
@@ -467,7 +459,7 @@ fn openai_compat_files(
     });
     let resp = http_agent()
         .post(&url)
-        .set("Authorization", &format!("Bearer {}", state.image_gen_api_key.trim()))
+        .set("Authorization", &format!("Bearer {}", ep.api_key.trim()))
         .set("Content-Type", "application/json")
         .send_json(body)
         .map_err(|e| format!("生图 API 失败: {e}"))?;
@@ -609,8 +601,12 @@ mod tests {
         let dir = tempdir().unwrap();
         std::env::set_var("INSPIREX_LIBRARY_PATH", dir.path().join("Library"));
         std::env::set_var("AI_MOCK_MODE", "true");
+        let cfg = dir.path().join("ai-services.json");
+        std::env::set_var("INSPIREX_AI_CONFIG", &cfg);
         std::env::remove_var("MINIMAX_API_KEY");
         std::env::remove_var("MINIMAX_IMAGE_MODEL");
+        std::env::remove_var("TEXT_GEN_PROVIDER");
+        std::env::remove_var("TEXT_GEN_API_KEY");
 
         std::env::set_var("IMAGE_GEN_PROVIDER", "minimax");
         std::env::set_var("IMAGE_GEN_API_KEY", "sk-test");
@@ -618,13 +614,14 @@ mod tests {
         std::env::set_var("IMAGE_GEN_MODEL", "");
         let with_key = AppState::from_env();
         assert_eq!(effective_provider(&with_key), "minimax");
-        assert_eq!(default_model(&with_key, "minimax"), "image-01");
+        assert_eq!(default_model(&with_key.ai_image().model, "minimax"), "image-01");
 
-        std::env::set_var("IMAGE_GEN_API_KEY", "");
+        std::env::remove_var("IMAGE_GEN_API_KEY");
         let no_key = AppState::from_env();
         assert_eq!(effective_provider(&no_key), "mock");
 
         std::env::set_var("IMAGE_GEN_PROVIDER", "mock");
+        std::env::remove_var("INSPIREX_AI_CONFIG");
     }
 
     #[test]

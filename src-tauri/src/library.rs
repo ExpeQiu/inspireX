@@ -1,3 +1,4 @@
+use crate::aisettings::{self, AiEndpoint, AiServices};
 use crate::clip::ClipService;
 use crate::db::{self, DbResult};
 use crate::models::{DeleteAssetResult, Folder, ImportResult, LibraryInfo};
@@ -5,24 +6,13 @@ use crate::pipeline::{
     analyze_image, content_hash_file, guess_mime, is_image, is_media, is_video, write_thumbnail,
 };
 use crate::video::{extract_keyframe, has_ffmpeg};
+use parking_lot::RwLock;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
 const IMPORT_DIR_LIMIT: usize = 2000;
-
-fn env_first(keys: &[&str]) -> String {
-    for k in keys {
-        if let Ok(v) = std::env::var(k) {
-            let t = v.trim().to_string();
-            if !t.is_empty() {
-                return t;
-            }
-        }
-    }
-    String::new()
-}
 
 fn is_hidden_file_name(name: &str) -> bool {
     name.starts_with('.') || name.starts_with("._")
@@ -78,10 +68,8 @@ pub struct AppState {
     pub clip: Arc<ClipService>,
     pub ingest_port: u16,
     pub ingest_token: String,
-    pub image_gen_provider: String,
-    pub image_gen_base_url: String,
-    pub image_gen_api_key: String,
-    pub image_gen_model: String,
+    pub ai: RwLock<AiServices>,
+    pub ai_config_path: PathBuf,
     pub subscribe_poll_min: i64,
 }
 
@@ -109,21 +97,8 @@ impl AppState {
             .unwrap_or(18765);
         let ingest_token = std::env::var("INSPIREX_INGEST_TOKEN")
             .unwrap_or_else(|_| "inspirex-local".to_string());
-        let image_gen_provider = std::env::var("IMAGE_GEN_PROVIDER")
-            .unwrap_or_else(|_| "mock".to_string())
-            .trim()
-            .to_ascii_lowercase();
-        let image_gen_api_key = env_first(&["IMAGE_GEN_API_KEY", "MINIMAX_API_KEY"]);
-        let mut image_gen_base_url = env_first(&["IMAGE_GEN_BASE_URL", "MINIMAX_BASE_URL"]);
-        let mut image_gen_model = env_first(&["IMAGE_GEN_MODEL", "MINIMAX_IMAGE_MODEL"]);
-        if image_gen_provider == "minimax" {
-            if image_gen_base_url.is_empty() {
-                image_gen_base_url = "https://api.minimaxi.com".into();
-            }
-            if image_gen_model.is_empty() {
-                image_gen_model = "image-01".into();
-            }
-        }
+        let ai_config_path = aisettings::config_file();
+        let ai = RwLock::new(aisettings::load(&ai_config_path));
         let subscribe_poll_min = std::env::var("SUBSCRIBE_POLL_MIN")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -135,10 +110,8 @@ impl AppState {
             clip,
             ingest_port,
             ingest_token,
-            image_gen_provider,
-            image_gen_base_url,
-            image_gen_api_key,
-            image_gen_model,
+            ai,
+            ai_config_path,
             subscribe_poll_min,
         }
     }
@@ -148,18 +121,24 @@ impl AppState {
         let db_path = library_path.join("inspirex.db");
         let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         Self {
-            library_path,
+            library_path: library_path.clone(),
             ai_mock_mode: true,
             db_path,
             clip: ClipService::from_env(&project_root),
             ingest_port: 18765,
             ingest_token: "inspirex-local".into(),
-            image_gen_provider: "mock".into(),
-            image_gen_base_url: String::new(),
-            image_gen_api_key: String::new(),
-            image_gen_model: String::new(),
+            ai: RwLock::new(AiServices::mock_all()),
+            ai_config_path: library_path.join("ai-services.json"),
             subscribe_poll_min: 360,
         }
+    }
+
+    pub fn ai_text(&self) -> AiEndpoint {
+        self.ai.read().text.clone()
+    }
+
+    pub fn ai_image(&self) -> AiEndpoint {
+        self.ai.read().image.clone()
     }
 
     pub fn ensure_dirs(&self) -> std::io::Result<()> {

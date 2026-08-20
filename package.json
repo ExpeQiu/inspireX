@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bundle:dmg": "bash scripts/bundle-macos.sh"
   },
   "dependencies": {
     "@crabnebula/tauri-plugin-drag": "^2.1.0",

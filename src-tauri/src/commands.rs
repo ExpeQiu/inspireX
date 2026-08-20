@@ -4,8 +4,9 @@ use crate::browse::{ExternalListing, HubCopyResult, HubStatus, IndexRoot, LocalI
 use crate::finder_tags::{FinderTag, FinderTagValue};
 use crate::library::AppState;
 use crate::models::{
-    Asset, CreateSource, DeleteAssetResult, Folder, GenerateRequest, GenJob, IngestImportRequest,
-    LibraryInfo, SearchQuery, Source, Tag, UpdateAssetMeta,
+    Asset, CreatePromptPreset, CreateSource, DeleteAssetResult, Folder, GenerateRequest, GenJob,
+    IngestImportRequest, LibraryInfo, MinedPrompt, PromptCategory, PromptPreset, SearchQuery,
+    Source, Tag, UpdateAssetMeta, UpdatePromptPreset,
 };
 use crate::rpc::{self, FolderContents};
 use std::sync::Arc;
@@ -221,8 +222,9 @@ pub async fn list_browse_dir(
 pub fn list_picker_dir(
     path: Option<String>,
     kind: Option<String>,
+    include_media: Option<bool>,
 ) -> Result<ExternalListing, String> {
-    rpc::list_picker_dir(path, kind)
+    rpc::list_picker_dir(path, kind, include_media)
 }
 
 #[tauri::command]
@@ -359,4 +361,87 @@ pub fn list_gen_jobs(
     limit: Option<i64>,
 ) -> Result<Vec<GenJob>, String> {
     rpc::list_gen_jobs(&state, limit)
+}
+
+#[tauri::command]
+pub fn list_prompt_presets(state: State<'_, Arc<AppState>>) -> Result<Vec<PromptPreset>, String> {
+    rpc::list_prompt_presets(&state)
+}
+
+#[tauri::command]
+pub async fn mine_prompt_from_image(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<MinedPrompt, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || rpc::mine_prompt_from_image(&state, path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn create_prompt_preset(
+    state: State<'_, Arc<AppState>>,
+    req: CreatePromptPreset,
+) -> Result<PromptPreset, String> {
+    rpc::create_prompt_preset(&state, req)
+}
+
+#[tauri::command]
+pub fn update_prompt_preset(
+    state: State<'_, Arc<AppState>>,
+    req: UpdatePromptPreset,
+) -> Result<PromptPreset, String> {
+    rpc::update_prompt_preset(&state, req)
+}
+
+#[tauri::command]
+pub fn delete_prompt_preset(
+    state: State<'_, Arc<AppState>>,
+    preset_id: String,
+) -> Result<bool, String> {
+    rpc::delete_prompt_preset(&state, preset_id)
+}
+
+#[tauri::command]
+pub fn list_prompt_categories(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<PromptCategory>, String> {
+    rpc::list_prompt_categories(&state)
+}
+
+#[tauri::command]
+pub fn create_prompt_category(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> Result<PromptCategory, String> {
+    rpc::create_prompt_category(&state, name)
+}
+
+#[tauri::command]
+pub fn delete_prompt_category(
+    state: State<'_, Arc<AppState>>,
+    category_id: String,
+) -> Result<bool, String> {
+    rpc::delete_prompt_category(&state, category_id)
+}
+
+#[tauri::command]
+pub fn get_ai_settings(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::aisettings::AiServicesView, String> {
+    Ok(rpc::get_ai_settings(&state))
+}
+
+#[tauri::command]
+pub fn set_ai_settings(
+    state: State<'_, Arc<AppState>>,
+    text: Option<crate::aisettings::AiEndpointPatch>,
+    image: Option<crate::aisettings::AiEndpointPatch>,
+    video: Option<crate::aisettings::AiEndpointPatch>,
+) -> Result<crate::aisettings::AiServicesView, String> {
+    rpc::set_ai_settings(
+        &state,
+        crate::aisettings::AiServicesPatch { text, image, video },
+    )
 }

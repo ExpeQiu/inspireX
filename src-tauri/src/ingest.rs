@@ -3,9 +3,9 @@
 //! 默认 127.0.0.1:18765，Bearer token 鉴权（浏览 GET 仅本机、不鉴权）。
 
 use crate::browse::{
-    add_index_root, add_local_index_root, ensure_readable, ensure_under_kind, list_browse_for_kind,
-    list_index_roots, list_local_index_roots, parse_browse_kind, remove_index_root,
-    remove_local_index_root, root_for_kind,
+    add_index_root, add_local_index_root, ensure_picker_media, ensure_readable, ensure_under_kind,
+    list_browse_for_kind, list_index_roots, list_local_index_roots, parse_browse_kind,
+    remove_index_root, remove_local_index_root, root_for_kind,
 };
 use crate::db;
 use crate::library::{create_folder, import_from_url, import_paths, library_info, AppState};
@@ -13,9 +13,10 @@ use crate::models::{
     IngestCreateFolderRequest, IngestImportBatchRequest, IngestImportPathsRequest, IngestImportRequest,
 };
 use crate::pipeline::guess_mime;
-use std::io::{Cursor, Read};
+use std::fs::File;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 pub fn spawn_ingest_server(state: Arc<AppState>) {
@@ -31,13 +32,64 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                     return;
                 }
             };
+            let workers = ingest_pool_size();
+            let tx = spawn_ingest_pool(workers);
             log::info!(
                 target: "inspirex",
-                "ingest_listen addr={} token_set={}",
+                "ingest_listen addr={} token_set={} workers={}",
                 addr,
-                !state.ingest_token.is_empty()
+                !state.ingest_token.is_empty(),
+                workers
             );
-            for mut request in server.incoming_requests() {
+            for request in server.incoming_requests() {
+                let state = Arc::clone(&state);
+                if tx
+                    .send(Box::new(move || handle_request(state, request)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .ok();
+}
+
+fn ingest_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().clamp(4, 12))
+        .unwrap_or(8)
+}
+
+fn spawn_ingest_pool(n: usize) -> mpsc::SyncSender<Box<dyn FnOnce() + Send>> {
+    let (tx, rx) = mpsc::sync_channel::<Box<dyn FnOnce() + Send>>(64);
+    let rx = Arc::new(Mutex::new(rx));
+    for i in 0..n {
+        let rx = Arc::clone(&rx);
+        let _ = std::thread::Builder::new()
+            .name(format!("inspirex-http-{i}"))
+            .spawn(move || loop {
+                let job = {
+                    let Ok(guard) = rx.lock() else {
+                        break;
+                    };
+                    guard.recv()
+                };
+                match job {
+                    Ok(f) => f(),
+                    Err(_) => break,
+                }
+            });
+    }
+    tx
+}
+
+fn warmup_listing(state: &AppState, listing: &crate::browse::ExternalListing) {
+    let paths: Vec<String> = listing.media.iter().map(|m| m.path.clone()).collect();
+    crate::thumb::spawn_warmup(state.library_path.clone(), paths, 240);
+}
+
+fn handle_request(state: Arc<AppState>, mut request: tiny_http::Request) {
+
                 let method = request.method().clone();
                 let url = request.url().to_string();
                 let path = url.split('?').next().unwrap_or(&url);
@@ -45,13 +97,13 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                 // CORS preflight
                 if method == Method::Options {
                     let _ = request.respond(cors_empty(StatusCode(204)));
-                    continue;
+                    return;
                 }
 
                 if path == "/health" && method == Method::Get {
                     let body = r#"{"ok":true,"service":"inspirex-ingest"}"#;
                     let _ = request.respond(cors_json(StatusCode(200), body));
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/root" && method == Method::Get {
@@ -66,7 +118,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                     let body = serde_json::to_string(&root.display().to_string())
                         .unwrap_or_else(|_| "\"/Volumes\"".into());
                     let _ = request.respond(cors_json(StatusCode(200), &body));
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/list" && method == Method::Get {
@@ -87,6 +139,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                     match list_browse_for_kind(target, &kind, limit, offset) {
                         Ok(listing) => match serde_json::to_string(&listing) {
                             Ok(body) => {
+                                warmup_listing(&state, &listing);
                                 let _ = request.respond(cors_json(StatusCode(200), &body));
                             }
                             Err(e) => {
@@ -106,7 +159,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/index-roots" && method == Method::Get {
@@ -114,7 +167,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                     let list = list_index_roots(kind);
                     let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
                     let _ = request.respond(cors_json(StatusCode(200), &body));
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/index-roots" && method == Method::Post {
@@ -143,7 +196,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/index-roots/remove" && method == Method::Post {
@@ -172,14 +225,14 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/local-roots" && method == Method::Get {
                     let list = list_local_index_roots();
                     let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
                     let _ = request.respond(cors_json(StatusCode(200), &body));
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/local-roots" && method == Method::Post {
@@ -207,7 +260,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/local-roots/remove" && method == Method::Post {
@@ -235,7 +288,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/by-tag" && method == Method::Get {
@@ -244,7 +297,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             StatusCode(400),
                             &json_err("tag required"),
                         ));
-                        continue;
+                        return;
                     };
                     let kind = parse_browse_kind(query_param(&url, "kind").as_deref()).to_string();
                     let root = root_for_kind(&kind);
@@ -265,6 +318,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                     }) {
                         Ok(listing) => match serde_json::to_string(&listing) {
                             Ok(body) => {
+                                warmup_listing(&state, &listing);
                                 let _ = request.respond(cors_json(StatusCode(200), &body));
                             }
                             Err(e) => {
@@ -285,7 +339,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/thumb" && method == Method::Get {
@@ -294,7 +348,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             StatusCode(400),
                             &json_err("path required"),
                         ));
-                        continue;
+                        return;
                     };
                     let side = query_param(&url, "maxSide")
                         .and_then(|s| s.parse().ok())
@@ -302,17 +356,13 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                     let p = PathBuf::from(&raw);
                     match ensure_readable(&p).and_then(|safe| {
                         crate::thumb::ensure_image_thumb(&safe, &state.library_path, side)
-                            .map(|t| t.display().to_string())
                     }) {
-                        Ok(thumb) => {
-                            let body = serde_json::to_string(&thumb).unwrap_or_default();
-                            let _ = request.respond(cors_json(StatusCode(200), &body));
-                        }
+                        Ok(thumb) => respond_media(request, &thumb, true),
                         Err(e) => {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/browse/file" && method == Method::Get {
@@ -321,26 +371,21 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             StatusCode(400),
                             &json_err("path required"),
                         ));
-                        continue;
+                        return;
                     };
                     match allow_read_path(&state, Path::new(&raw)) {
-                        Ok(safe) => match std::fs::read(&safe) {
-                            Ok(data) => {
-                                let mime = guess_mime(&safe).unwrap_or("application/octet-stream");
-                                let _ = request.respond(cors_bytes(StatusCode(200), mime, data));
-                            }
-                            Err(e) => {
-                                let _ = request.respond(cors_json(
-                                    StatusCode(404),
-                                    &json_err(&e.to_string()),
-                                ));
-                            }
-                        },
+                        Ok(safe) => respond_media(request, &safe, is_immutable_media(&safe)),
                         Err(e) => {
+                            log::warn!(
+                                target: "inspirex",
+                                "browse_file_deny path={} err={}",
+                                raw,
+                                e
+                            );
                             let _ = request.respond(cors_json(StatusCode(403), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/invoke" && method == Method::Post {
@@ -369,7 +414,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/library/info" && method == Method::Get {
@@ -382,7 +427,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(500), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/folders" && method == Method::Get {
@@ -395,7 +440,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(500), &json_err(&e.to_string())));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/folders" && method == Method::Post {
@@ -413,7 +458,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/tags" && method == Method::Get {
@@ -426,7 +471,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(500), &json_err(&e.to_string())));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/import/paths" && method == Method::Post {
@@ -467,7 +512,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             let _ = request.respond(cors_json(StatusCode(400), &json_err(&e)));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/import" && method == Method::Post {
@@ -476,7 +521,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             StatusCode(401),
                             r#"{"ok":false,"error":"unauthorized"}"#,
                         ));
-                        continue;
+                        return;
                     }
                     let mut body = String::new();
                     if let Err(e) = request.as_reader().read_to_string(&mut body) {
@@ -484,7 +529,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             StatusCode(400),
                             &format!(r#"{{"ok":false,"error":"read body: {e}"}}"#),
                         ));
-                        continue;
+                        return;
                     }
                     let parsed: Result<IngestImportRequest, _> = serde_json::from_str(&body);
                     let req = match parsed {
@@ -494,7 +539,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                                 StatusCode(400),
                                 &format!(r#"{{"ok":false,"error":"json: {e}"}}"#),
                             ));
-                            continue;
+                            return;
                         }
                     };
                     if req.image_url.trim().is_empty() {
@@ -502,7 +547,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             StatusCode(400),
                             r#"{"ok":false,"error":"imageUrl required"}"#,
                         ));
-                        continue;
+                        return;
                     }
                     let inline = req
                         .image_base64
@@ -548,7 +593,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             ));
                         }
                     }
-                    continue;
+                    return;
                 }
 
                 if path == "/v1/import/batch" && method == Method::Post {
@@ -557,7 +602,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             StatusCode(401),
                             r#"{"ok":false,"error":"unauthorized"}"#,
                         ));
-                        continue;
+                        return;
                     }
                     let mut body = String::new();
                     if let Err(e) = request.as_reader().read_to_string(&mut body) {
@@ -565,7 +610,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             StatusCode(400),
                             &format!(r#"{{"ok":false,"error":"read body: {e}"}}"#),
                         ));
-                        continue;
+                        return;
                     }
                     let parsed: Result<IngestImportBatchRequest, _> = serde_json::from_str(&body);
                     let req = match parsed {
@@ -575,7 +620,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                                 StatusCode(400),
                                 &format!(r#"{{"ok":false,"error":"json: {e}"}}"#),
                             ));
-                            continue;
+                            return;
                         }
                     };
                     let urls: Vec<String> = req
@@ -590,7 +635,7 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                             StatusCode(400),
                             r#"{"ok":false,"error":"imageUrls required"}"#,
                         ));
-                        continue;
+                        return;
                     }
                     let batch_id = uuid::Uuid::new_v4().to_string();
                     log::info!(
@@ -636,17 +681,150 @@ pub fn spawn_ingest_server(state: Arc<AppState>) {
                         "runId": batch_id,
                     });
                     let _ = request.respond(cors_json(StatusCode(200), &payload.to_string()));
-                    continue;
+                    return;
                 }
 
                 let _ = request.respond(cors_json(
                     StatusCode(404),
                     r#"{"ok":false,"error":"not found"}"#,
                 ));
-            }
-        })
-        .ok();
+
 }
+
+
+fn is_immutable_media(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some("browse-thumbs") | Some("thumbs")
+        )
+    })
+}
+
+fn cache_control_for(immutable: bool) -> &'static str {
+    if immutable {
+        "public, max-age=31536000, immutable"
+    } else {
+        "private, max-age=120"
+    }
+}
+
+fn parse_byte_range(headers: &[Header], len: u64) -> Option<(u64, u64)> {
+    let raw = headers.iter().find(|h| {
+        h.field.as_str().as_str().eq_ignore_ascii_case("Range")
+    })?;
+    let s = raw.value.as_str().trim().strip_prefix("bytes=")?;
+    let (a, b) = s.split_once('-')?;
+    let (start, end) = if a.is_empty() {
+        let n: u64 = b.parse().ok()?;
+        (len.saturating_sub(n), len.saturating_sub(1))
+    } else {
+        let start: u64 = a.parse().ok()?;
+        let end = if b.is_empty() {
+            len.saturating_sub(1)
+        } else {
+            b.parse::<u64>().ok()?.min(len.saturating_sub(1))
+        };
+        (start, end)
+    };
+    if len == 0 || start > end || start >= len {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn hdr(name: &str, value: &str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("header")
+}
+
+fn respond_media(request: tiny_http::Request, path: &Path, immutable: bool) {
+    match File::open(path) {
+        Ok(mut file) => {
+            let len = match file.metadata() {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    let _ = request.respond(cors_json(StatusCode(404), &json_err(&e.to_string())));
+                    return;
+                }
+            };
+            let mime = guess_mime(path).unwrap_or("application/octet-stream");
+            let cache = cache_control_for(immutable);
+            let range = parse_byte_range(request.headers(), len);
+            let mut headers = vec![
+                hdr("Access-Control-Allow-Origin", "*"),
+                hdr("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+                hdr("Access-Control-Allow-Private-Network", "true"),
+                hdr("Content-Type", mime),
+                hdr("Cache-Control", cache),
+                hdr("Accept-Ranges", "bytes"),
+            ];
+            if let Some((start, end)) = range {
+                let nbytes = end - start + 1;
+                if file.seek(SeekFrom::Start(start)).is_err() {
+                    let _ = request.respond(cors_json(
+                        StatusCode(416),
+                        &json_err("range seek failed"),
+                    ));
+                    return;
+                }
+                headers.push(hdr(
+                    "Content-Range",
+                    &format!("bytes {start}-{end}/{len}"),
+                ));
+                log::debug!(
+                    target: "inspirex",
+                    "browse_file_range path={} start={} end={} mime={}",
+                    path.display(),
+                    start,
+                    end,
+                    mime
+                );
+                let _ = request.respond(Response::new(
+                    StatusCode(206),
+                    headers,
+                    file.take(nbytes),
+                    Some(nbytes as usize),
+                    None,
+                ));
+            } else {
+                if len > 256 * 1024 {
+                    log::info!(
+                        target: "inspirex",
+                        "browse_file_ok path={} bytes={} mime={}",
+                        path.display(),
+                        len,
+                        mime
+                    );
+                } else {
+                    log::debug!(
+                        target: "inspirex",
+                        "browse_file_ok path={} bytes={} mime={}",
+                        path.display(),
+                        len,
+                        mime
+                    );
+                }
+                let _ = request.respond(Response::new(
+                    StatusCode(200),
+                    headers,
+                    file,
+                    Some(len as usize),
+                    None,
+                ));
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                target: "inspirex",
+                "browse_file_read_fail path={} err={}",
+                path.display(),
+                e
+            );
+            let _ = request.respond(cors_json(StatusCode(404), &json_err(&e.to_string())));
+        }
+    }
+}
+
 
 fn authorize(request: &tiny_http::Request, token: &str) -> bool {
     if token.is_empty() {
@@ -697,19 +875,6 @@ fn cors_empty(status: StatusCode) -> Response<Cursor<Vec<u8>>> {
     Response::new(status, headers, Cursor::new(Vec::new()), Some(0), None)
 }
 
-fn cors_bytes(status: StatusCode, content_type: &str, data: Vec<u8>) -> Response<Cursor<Vec<u8>>> {
-    let headers = vec![
-        Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
-        Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, OPTIONS"[..])
-            .unwrap(),
-        Header::from_bytes(&b"Access-Control-Allow-Private-Network"[..], &b"true"[..]).unwrap(),
-        Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes()).unwrap(),
-        Header::from_bytes(&b"Cache-Control"[..], &b"private, max-age=60"[..]).unwrap(),
-    ];
-    let len = data.len();
-    Response::new(status, headers, Cursor::new(data), Some(len), None)
-}
-
 fn json_err(msg: &str) -> String {
     serde_json::json!({ "ok": false, "error": msg }).to_string()
 }
@@ -723,6 +888,9 @@ fn read_json<T: serde::de::DeserializeOwned>(request: &mut tiny_http::Request) -
 
 fn allow_read_path(state: &AppState, path: &Path) -> Result<PathBuf, String> {
     if let Ok(p) = ensure_readable(path) {
+        return Ok(p);
+    }
+    if let Ok(p) = ensure_picker_media(path) {
         return Ok(p);
     }
     let lib = state
@@ -824,5 +992,26 @@ mod tests {
         .unwrap();
         assert_eq!(req.cmd, "create_tag");
         assert_eq!(req.args["name"], "红");
+    }
+
+    #[test]
+    fn immutable_cache_for_thumb_dir() {
+        assert!(is_immutable_media(Path::new("/tmp/lib/browse-thumbs/abc.jpg")));
+        assert!(is_immutable_media(Path::new("/tmp/lib/thumbs/id.jpg")));
+        assert!(!is_immutable_media(Path::new("/Volumes/Lexar/a.jpg")));
+        assert_eq!(
+            cache_control_for(true),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[test]
+    fn parse_byte_range_suffix_and_open_end() {
+        let h = vec![hdr("Range", "bytes=0-99")];
+        assert_eq!(parse_byte_range(&h, 1000), Some((0, 99)));
+        let h = vec![hdr("Range", "bytes=100-")];
+        assert_eq!(parse_byte_range(&h, 150), Some((100, 149)));
+        let h = vec![hdr("Range", "bytes=-20")];
+        assert_eq!(parse_byte_range(&h, 100), Some((80, 99)));
     }
 }

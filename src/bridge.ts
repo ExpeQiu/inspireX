@@ -5,11 +5,13 @@ import {
 import {
   httpSpec,
   ingestBasesFor,
+  ingestMediaUrl,
   isIpcMissingMessage,
   isLocalHttpOrigin,
+  browseThumbPath,
 } from "./bridge-logic";
 
-export { isIpcMissingMessage };
+export { isIpcMissingMessage, browseThumbPath };
 
 type IpcState = "unknown" | "yes" | "no";
 
@@ -211,4 +213,10 @@ export function convertFileSrc(filePath: string, protocol?: string): string {
     return `/v1/browse/file?${q}`;
   }
   return `http://127.0.0.1:${ingestPort()}/v1/browse/file?${q}`;
+}
+
+/** 缩略图一次 GET 直接拿 JPEG，不再 RPC 取路径再读文件。 */
+export function thumbSrc(filePath: string, maxSide = 240): string {
+  if (!filePath) return "";
+  return ingestMediaUrl(pageOrigin(), ingestPort(), browseThumbPath(filePath, maxSide));
 }

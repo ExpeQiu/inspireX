@@ -34,6 +34,19 @@ export function ingestBasesFor(origin: string | undefined, port: string): string
   return abs;
 }
 
+export function browseThumbPath(filePath: string, maxSide = 240): string {
+  return `/v1/browse/thumb?path=${encodeURIComponent(filePath)}&maxSide=${maxSide}`;
+}
+
+export function ingestMediaUrl(
+  origin: string | undefined,
+  port: string,
+  pathAndQuery: string,
+): string {
+  if (origin && isLocalHttpOrigin(origin)) return pathAndQuery;
+  return `http://127.0.0.1:${port}${pathAndQuery}`;
+}
+
 /** 全部命令走本机 `/v1/invoke`；插件采集仍用独立 REST。 */
 export function httpSpec(cmd: string, args?: object): HttpSpec {
   return {

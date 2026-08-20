@@ -9,17 +9,22 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { convertFileSrc, hasTauriIpc, invoke } from "./bridge";
+import { convertFileSrc, hasTauriIpc, invoke, thumbSrc } from "./bridge";
 import { pickFiles, splitPathList } from "./desktop";
 import { FolderPicker, type FolderPickerKind } from "./FolderPicker";
+import { SettingsPanel } from "./Settings";
 import {
+  appModule,
   defaultBrowsePath,
   folderPath,
+  parseAppHref,
   parseAppUrl,
   PATHS,
+  promptCategoryPath,
   sameRoute,
   toHref,
   type BrowseKind,
+  type GenerateView,
   type Mode,
 } from "./routes";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -27,7 +32,7 @@ import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import "./App.css";
 
 type FolderPickerState = {
-  purpose: "index" | "hub";
+  purpose: "index" | "hub" | "prompt-image";
   kind: FolderPickerKind;
 };
 
@@ -111,6 +116,29 @@ type GenJob = {
 type PickedGen = {
   path: string;
   jobId: string;
+};
+
+type PromptPreset = {
+  id: string;
+  name: string;
+  body: string;
+  imagePath?: string | null;
+  categoryId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type PromptCategory = {
+  id: string;
+  name: string;
+  createdAt: string;
+  itemCount?: number;
+};
+
+type MinedPrompt = {
+  name: string;
+  body: string;
+  provider: string;
 };
 
 type ExternalKind = "folder" | "image" | "video";
@@ -221,7 +249,6 @@ const FINDER_CUSTOM_KEY = "inspirex.finderCustomTags";
 const FINDER_HIDDEN_KEY = "inspirex.finderHiddenTags";
 const PINNED_FOLDERS_KEY = "inspirex.pinnedFolders";
 const BROWSE_PAGE_SIZE = 72;
-const THUMB_MAX_CONCURRENCY = 4;
 const FINDER_PALETTE: FinderTag[] = [
   { name: "红色", color: 6, hex: "#FF5F57" },
   { name: "橙色", color: 7, hex: "#FEBC2E" },
@@ -251,48 +278,6 @@ function displayFolderName(name: string): string {
     return name.replace(/\.photoslibrary$/i, "");
   }
   return name;
-}
-
-type ThumbJob = {
-  id: number;
-  run: () => Promise<void>;
-};
-
-let thumbJobSeq = 0;
-let thumbActive = 0;
-const thumbQueue: ThumbJob[] = [];
-
-function pumpThumbQueue() {
-  while (thumbActive < THUMB_MAX_CONCURRENCY && thumbQueue.length > 0) {
-    const job = thumbQueue.shift()!;
-    thumbActive += 1;
-    job
-      .run()
-      .catch(() => undefined)
-      .finally(() => {
-        thumbActive -= 1;
-        pumpThumbQueue();
-      });
-  }
-}
-
-function enqueueThumb(run: () => Promise<void>): () => void {
-  const id = ++thumbJobSeq;
-  let cancelled = false;
-  const job: ThumbJob = {
-    id,
-    run: async () => {
-      if (cancelled) return;
-      await run();
-    },
-  };
-  thumbQueue.push(job);
-  pumpThumbQueue();
-  return () => {
-    cancelled = true;
-    const idx = thumbQueue.findIndex((j) => j.id === id);
-    if (idx >= 0) thumbQueue.splice(idx, 1);
-  };
 }
 
 function loadSidebarHidden(): Set<string> {
@@ -424,7 +409,7 @@ function sourceKindLabel(kind?: string | null): string {
     case "url_list":
       return "URL 列表";
     case "ai":
-      return "AI";
+      return "AI创作";
     default:
       return kind || "本地";
   }
@@ -464,6 +449,7 @@ function RatioThumb({
   width,
   height,
   background,
+  eager = false,
 }: {
   src?: string | null;
   alt: string;
@@ -471,12 +457,40 @@ function RatioThumb({
   width?: number | null;
   height?: number | null;
   background?: string;
+  eager?: boolean;
 }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const known = ratioFromSize(width, height);
+  const [visible, setVisible] = useState(eager);
   const [ratio, setRatio] = useState(
     () => known ?? aspectCache.get(cacheKey) ?? "3 / 4",
   );
   const [ready, setReady] = useState(() => Boolean(known || aspectCache.get(cacheKey)));
+
+  useEffect(() => {
+    if (eager) {
+      setVisible(true);
+      return;
+    }
+    setVisible(false);
+  }, [cacheKey, eager]);
+
+  useEffect(() => {
+    if (eager || visible) return;
+    const el = rootRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setVisible(true);
+          io.disconnect();
+        }
+      },
+      { root: null, rootMargin: "240px", threshold: 0.01 },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [cacheKey, eager, visible]);
 
   useEffect(() => {
     if (!known) return;
@@ -487,17 +501,19 @@ function RatioThumb({
 
   return (
     <div
+      ref={rootRef}
       className={`thumb${ready ? " thumb-ready" : ""}`}
       style={{
         background: background || "var(--surface-2)",
         aspectRatio: ready ? ratio : undefined,
       }}
     >
-      {src ? (
+      {src && visible ? (
         <img
           src={src}
           alt={alt}
           loading="lazy"
+          decoding="async"
           onLoad={(e) => {
             const r = ratioFromSize(
               e.currentTarget.naturalWidth,
@@ -524,7 +540,7 @@ function ExternalThumb({
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [visible, setVisible] = useState(large);
-  const [src, setSrc] = useState<string | null>(null);
+  const [useOrig, setUseOrig] = useState(false);
   const [err, setErr] = useState(false);
   const [ratio, setRatio] = useState(
     () =>
@@ -547,8 +563,11 @@ function ExternalThumb({
   useEffect(() => {
     const cached = aspectCache.get(item.path);
     setRatio(cached ?? (item.kind === "video" ? "16 / 9" : "3 / 4"));
-    setReady(Boolean(cached));
-  }, [item.path, item.kind]);
+    setReady(Boolean(cached) || item.kind === "video");
+    setUseOrig(false);
+    setErr(false);
+    if (!large) setVisible(false);
+  }, [item.path, item.kind, large]);
 
   useEffect(() => {
     if (large || visible) return;
@@ -565,37 +584,13 @@ function ExternalThumb({
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [large, visible]);
+  }, [item.path, large, visible]);
 
-  useEffect(() => {
-    if (!visible) return;
-    let cancelled = false;
-    setSrc(null);
-    setErr(false);
-
-    const cancelQueue = enqueueThumb(async () => {
-      if (cancelled) return;
-      try {
-        const thumbPath = await invoke<string>("get_image_thumb", {
-          path: item.path,
-          maxSide: large ? 960 : 240,
-        });
-        if (!cancelled) setSrc(convertFileSrc(thumbPath));
-      } catch {
-        if (cancelled) return;
-        if (item.kind === "video") {
-          setErr(true);
-        } else {
-          setSrc(convertFileSrc(item.path));
-        }
-      }
-    });
-
-    return () => {
-      cancelled = true;
-      cancelQueue();
-    };
-  }, [item.path, item.kind, large, visible]);
+  const src = !visible
+    ? null
+    : useOrig
+      ? convertFileSrc(item.path)
+      : thumbSrc(item.path, large ? 960 : 240);
 
   let body: ReactNode;
   if (err) {
@@ -605,7 +600,7 @@ function ExternalThumb({
       </div>
     );
   } else if (!visible || !src) {
-    body = <div className="thumb-fallback">{visible ? "加载中…" : ""}</div>;
+    body = <div className="thumb-fallback" />;
   } else if (item.kind === "video" && large) {
     body = (
       <div className="thumb-inner">
@@ -634,7 +629,15 @@ function ExternalThumb({
           onLoad={(e) =>
             rememberRatio(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)
           }
-          onError={() => setErr(true)}
+          onError={() => {
+            if (item.kind === "video") {
+              setErr(true);
+            } else if (!useOrig) {
+              setUseOrig(true);
+            } else {
+              setErr(true);
+            }
+          }}
         />
         {item.kind === "video" ? (
           <span className="thumb-play" aria-hidden>
@@ -664,6 +667,12 @@ export default function App() {
   const boot = bootRef.current;
   const skipUrlSync = useRef(false);
   const [mode, setMode] = useState<Mode>(boot.mode);
+  const [lastNavModule, setLastNavModule] = useState<"library" | "generate">(
+    appModule(boot.mode) === "generate" ? "generate" : "library",
+  );
+  const [generateView, setGenerateView] = useState<GenerateView>(
+    boot.mode === "generate" ? boot.generateView ?? "generate" : "generate",
+  );
   const [info, setInfo] = useState<LibraryInfo | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -678,6 +687,11 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [useClip, setUseClip] = useState(true);
   const [status, setStatus] = useState("");
+  const [lastLibraryHref, setLastLibraryHref] = useState(() =>
+    appModule(boot.mode) === "library"
+      ? `${window.location.pathname}${window.location.search}` || PATHS.library
+      : PATHS.library,
+  );
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Asset | null>(null);
   const [tagDraft, setTagDraft] = useState("");
@@ -698,6 +712,20 @@ export default function App() {
   const [genSize, setGenSize] = useState("1024x1024");
   const [genFilterId, setGenFilterId] = useState<string | null>(null);
   const [pickedGen, setPickedGen] = useState<PickedGen | null>(null);
+  const [promptPresets, setPromptPresets] = useState<PromptPreset[]>([]);
+  const [promptCategories, setPromptCategories] = useState<PromptCategory[]>([]);
+  const [promptCategoryId, setPromptCategoryId] = useState<string | null>(
+    boot.mode === "generate" ? boot.promptCategoryId ?? null : null,
+  );
+  const [promptName, setPromptName] = useState("");
+  const [promptBody, setPromptBody] = useState("");
+  const [promptImagePath, setPromptImagePath] = useState<string | null>(null);
+  const [promptFormCategoryId, setPromptFormCategoryId] = useState<string | null>(
+    boot.mode === "generate" ? boot.promptCategoryId ?? null : null,
+  );
+  const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
+  const [promptFormOpen, setPromptFormOpen] = useState(false);
+  const [appliedPromptId, setAppliedPromptId] = useState<string | null>(null);
 
   const [browseKind, setBrowseKind] = useState<BrowseKind>(boot.browseKind);
   const [volumesRoot, setVolumesRoot] = useState(VOLUMES_VIRTUAL);
@@ -715,7 +743,7 @@ export default function App() {
   const [customFinderTags, setCustomFinderTags] = useState<FinderTag[]>(() => loadFinderCustom());
   const [hiddenFinderTags, setHiddenFinderTags] = useState<Set<string>>(() => loadFinderHidden());
   const [pinnedFolders, setPinnedFolders] = useState<PinnedFolder[]>(() => loadPinnedFolders());
-  const [pathAsk, setPathAsk] = useState<null | "files" | "hub-files">(null);
+  const [pathAsk, setPathAsk] = useState<null | "files" | "hub-files" | "prompt-image">(null);
   const [pathDraft, setPathDraft] = useState("");
   const [folderPicker, setFolderPicker] = useState<FolderPickerState | null>(null);
   const [sidebarHidden, setSidebarHidden] = useState<Set<string>>(() => loadSidebarHidden());
@@ -744,7 +772,11 @@ export default function App() {
     browsePath,
     tagFilter,
     colorFilter,
+    generateView,
+    promptCategoryId,
   });
+  const inCreated =
+    mode === "created" || (mode === "generate" && generateView === "created");
 
   useEffect(() => {
     if (skipUrlSync.current) {
@@ -767,6 +799,17 @@ export default function App() {
   }, [routeHref]);
 
   useEffect(() => {
+    if (appModule(mode) === "library") {
+      setLastLibraryHref(routeHref);
+    }
+    if (mode === "library" || mode === "browse" || mode === "subscribe" || mode === "created") {
+      setLastNavModule("library");
+    } else if (mode === "generate") {
+      setLastNavModule("generate");
+    }
+  }, [mode, routeHref]);
+
+  useEffect(() => {
     if (mode !== "generate") setPickedGen(null);
   }, [mode]);
 
@@ -775,6 +818,8 @@ export default function App() {
       const next = parseAppUrl(window.location.pathname, window.location.search);
       skipUrlSync.current = true;
       setMode(next.mode);
+      setGenerateView(next.generateView ?? "generate");
+      setPromptCategoryId(next.promptCategoryId ?? null);
       setBrowseKind(next.browseKind);
       setViewFolderId(next.viewFolderId);
       setTagFilter(next.tagFilter);
@@ -960,7 +1005,7 @@ export default function App() {
         setAssets(list);
         assetN = list.length;
       } else {
-        const list = await invoke<Asset[]>("list_assets", { folderId, limit: 200 });
+      const list = await invoke<Asset[]>("list_assets", { folderId, limit: 400 });
         setAssets(list);
         assetN = list.length;
       }
@@ -1028,13 +1073,23 @@ export default function App() {
       ),
     );
     setStatus(
-      `文件夹 · ${contents.folder.name} · ${contents.assets.length + contents.media.length} 项（虚拟索引，不复制文件）`,
+      `分类 · ${contents.folder.name} · ${contents.assets.length + contents.media.length} 项（虚拟索引，不复制文件）`,
     );
   }, []);
 
   const refreshSources = useCallback(async () => {
     const list = await invoke<Source[]>("list_sources");
     setSources(list);
+  }, []);
+
+  const refreshPromptPresets = useCallback(async () => {
+    const list = await invoke<PromptPreset[]>("list_prompt_presets");
+    setPromptPresets(list);
+  }, []);
+
+  const refreshPromptCategories = useCallback(async () => {
+    const list = await invoke<PromptCategory[]>("list_prompt_categories");
+    setPromptCategories(list);
   }, []);
 
   const refreshSubscribeResults = useCallback(async (ref?: string | null) => {
@@ -1100,6 +1155,39 @@ export default function App() {
       });
     }
     setAssets(list);
+  }, [tagFilter]);
+
+  const refreshCreatedResults = useCallback(async () => {
+    const [lib, folds, tagList] = await Promise.all([
+      invoke<LibraryInfo>("get_library_info"),
+      invoke<Folder[]>("list_folders"),
+      invoke<Tag[]>("list_tags"),
+    ]);
+    setInfo(lib);
+    setFolders(folds);
+    setTags(tagList);
+    setLibraryMedia([]);
+    setLibraryMediaTruncated(false);
+    setLibraryMediaTotal(0);
+    let list: Asset[];
+    if (tagFilter) {
+      const tagged = await invoke<Asset[]>("search_assets", {
+        query: { tag: tagFilter, useClip: false, limit: 400 },
+      });
+      list = tagged.filter((a) => a.sourceKind === "ai");
+    } else {
+      list = await invoke<Asset[]>("list_assets", {
+        sourceKind: "ai",
+        sourceRef: null,
+        limit: 400,
+      });
+    }
+    setAssets(list);
+    console.info("[inspirex]", {
+      event: "created_source_list",
+      count: list.length,
+      tag: tagFilter,
+    });
   }, [tagFilter]);
 
   const browseReqId = useRef(0);
@@ -1270,6 +1358,7 @@ export default function App() {
         setTagDraft(nextTags.join(", "));
         setStatus(remove ? `已去掉「${tag.name}」` : `已贴上「${tag.name}」`);
         if (mode === "library") await refreshLibrary();
+        else if (inCreated) await refreshCreatedResults();
         else if (mode === "subscribe") await refreshSubscribeResults(sourceFilterId);
         else if (mode === "generate") await refreshGenerateResults(genFilterId);
       } catch (e) {
@@ -1284,6 +1373,7 @@ export default function App() {
       refreshBrowse,
       selected,
       refreshLibrary,
+      refreshCreatedResults,
       refreshSubscribeResults,
       refreshGenerateResults,
       sourceFilterId,
@@ -1314,13 +1404,14 @@ export default function App() {
         });
         if (tagFilterRef.current) {
           if (mode === "library") await refreshLibrary();
+          else if (inCreated) await refreshCreatedResults();
           else await refreshBrowse(browsePath);
         }
       } catch (e) {
         setStatus(`标签失败: ${e}`);
       }
     },
-    [picked, browsePath, refreshBrowse, refreshLibrary, mode],
+    [picked, browsePath, refreshBrowse, refreshLibrary, refreshCreatedResults, mode],
   );
 
   const addPickedTagByName = useCallback(async () => {
@@ -1458,13 +1549,25 @@ export default function App() {
       refreshSubscribeResults(sourceFilterId).catch((e) => setStatus(String(e)));
       return;
     }
+    if (mode === "settings") return;
+    if (mode === "created" || (mode === "generate" && generateView === "created")) {
+      refreshCreatedResults().catch((e) => setStatus(String(e)));
+      return;
+    }
+    if (mode === "generate" && generateView === "prompt") {
+      refreshPromptCategories().catch((e) => setStatus(String(e)));
+      refreshPromptPresets().catch((e) => setStatus(String(e)));
+      return;
+    }
     if (mode === "generate") {
+      refreshPromptCategories().catch(() => {});
+      refreshPromptPresets().catch(() => {});
       refreshGenerateResults(genFilterId).catch((e) => setStatus(String(e)));
       return;
     }
     refreshBrowse(browsePath).catch((e) => setStatus(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅随导航/筛选变化加载，避免死循环
-  }, [mode, folderId, tagFilter, colorFilter, browsePath, browseKind, sourceFilterId, genFilterId, viewFolderId]);
+  }, [mode, generateView, folderId, tagFilter, colorFilter, browsePath, browseKind, sourceFilterId, genFilterId, viewFolderId]);
 
   useEffect(() => {
     if (mode !== "subscribe") return;
@@ -1759,6 +1862,10 @@ export default function App() {
   const onPickFolder = async (path: string) => {
     const purpose = folderPicker?.purpose;
     setFolderPicker(null);
+    if (purpose === "prompt-image") {
+      bindPromptImage(path);
+      return;
+    }
     try {
       if (purpose === "hub") {
         await bindHubFromPath(path);
@@ -1771,7 +1878,9 @@ export default function App() {
   };
 
   const folderPickerCopy = folderPicker
-    ? folderPicker.purpose === "hub"
+    ? folderPicker.purpose === "prompt-image"
+      ? { title: "选择参考图", confirmLabel: "选择" }
+      : folderPicker.purpose === "hub"
       ? { title: "选择中转站文件夹", confirmLabel: "绑定" }
       : mode === "library"
         ? { title: "选择要导入的文件夹", confirmLabel: "导入" }
@@ -1801,6 +1910,18 @@ export default function App() {
         setPathAsk(null);
         setBusy(true);
         await importPathsToLibrary(paths);
+        return;
+      }
+      if (pathAsk === "prompt-image") {
+        const paths = splitPathList(pathDraft);
+        if (paths.length === 0) {
+          setStatus("请填写图片绝对路径");
+          return;
+        }
+        setPathAsk(null);
+        setPromptImagePath(paths[0]);
+        console.info("[inspirex]", { event: "prompt_image_bind", via: "path" });
+        setStatus(`已关联图片 ${fileBaseName(paths[0])}`);
       }
     } catch (e) {
       setStatus(pathAsk === "hub-files" ? `存入中转站失败: ${e}` : `导入失败: ${e}`);
@@ -1827,19 +1948,29 @@ export default function App() {
     setColorFilter(null);
     setTagFilter(null);
     try {
+      if (inCreated && !query.trim()) {
+        await refreshCreatedResults();
+        return;
+      }
       const list = await invoke<Asset[]>("search_assets", {
         query: {
           text: query || null,
-          folderId,
+          folderId: inCreated ? null : folderId,
           useClip,
           limit: 100,
         },
       });
-      setAssets(list);
+      const shown = inCreated ? list.filter((a) => a.sourceKind === "ai") : list;
+      if (inCreated) {
+        setLibraryMedia([]);
+        setLibraryMediaTruncated(false);
+        setLibraryMediaTotal(0);
+      }
+      setAssets(shown);
       setStatus(
         query
-          ? `搜索「${query}」· ${useClip ? "CLIP" : "FTS"} · ${list.length} 条`
-          : `全部 · ${list.length} 条`,
+          ? `搜索「${query}」· ${useClip ? "CLIP" : "FTS"} · ${shown.length} 条`
+          : `全部 · ${shown.length} 条`,
       );
     } catch (e) {
       setStatus(`搜索失败: ${e}`);
@@ -1870,7 +2001,7 @@ export default function App() {
 
   const onCreateFolder = async () => {
     const name = window.prompt(
-      "文件夹名称\n将记在灵犀项目中，不会在外置卷或本地库新建目录",
+      "分类名称\n将记在灵犀项目中，不会在外置卷或本地库新建目录",
     )?.trim();
     if (!name) return;
     try {
@@ -1878,14 +2009,14 @@ export default function App() {
       await refreshFolders();
       setStatus(`已在灵犀创建「${folder.name}」（未改动来源目录）。勾选图片后点旁 + 放入`);
     } catch (e) {
-      setStatus(`创建文件夹失败: ${e}`);
+      setStatus(`创建分类失败: ${e}`);
     }
   };
 
   const onDeleteFolder = async (f: Folder, e: MouseEvent) => {
     e.stopPropagation();
     const ok = window.confirm(
-      `删除文件夹「${f.name}」？\n仅解除虚拟索引，不会删除原文件。`,
+      `删除分类「${f.name}」？\n仅解除虚拟索引，不会删除原文件。`,
     );
     if (!ok) return;
     try {
@@ -1900,13 +2031,19 @@ export default function App() {
       }
       await refreshFolders();
       if (mode === "library" && !viewFolderId) await refreshLibrary();
+      if (inCreated) await refreshCreatedResults();
       setStatus(`已从灵犀删除分类 · 解除索引 ${unlinked} · 删除记录 ${deleted}（来源文件未动）`);
     } catch (err) {
-      setStatus(`删除文件夹失败: ${err}`);
+      setStatus(`删除分类失败: ${err}`);
     }
   };
 
   const openVirtualFolder = (id: string) => {
+    if (mode === "generate") {
+      console.info("[inspirex]", { event: "module_switch", module: "library", via: "folder" });
+      setStatus("");
+    }
+    setMode("library");
     setViewFolderId(id);
     setTagFilter(null);
     setColorFilter(null);
@@ -1924,7 +2061,7 @@ export default function App() {
     const assetIds =
       libSelected.size > 0 ? [...libSelected] : selected ? [selected.id] : [];
     if (paths.length === 0 && assetIds.length === 0) {
-      setStatus("请先勾选图片，再点文件夹旁 +（虚拟放入，不复制文件）");
+      setStatus("请先勾选图片，再点分类旁 +（虚拟放入，不复制文件）");
       return;
     }
     try {
@@ -1943,7 +2080,7 @@ export default function App() {
           : `「${f.name}」里已有这些项`,
       );
     } catch (e) {
-      setStatus(`放入文件夹失败: ${e}`);
+      setStatus(`放入分类失败: ${e}`);
     }
   };
 
@@ -1957,7 +2094,7 @@ export default function App() {
       });
       await refreshFolderView(viewFolderId);
       await refreshFolders();
-      setStatus("已从文件夹移出（原文件未删）");
+      setStatus("已从分类移出（原文件未删）");
     } catch (e) {
       setStatus(`移出失败: ${e}`);
     }
@@ -2000,7 +2137,8 @@ export default function App() {
       .filter(Boolean);
     await invoke("set_asset_tags", { assetId: selected.id, tags: nextTags });
     setSelected({ ...selected, tags: nextTags });
-    await refreshLibrary();
+    if (inCreated) await refreshCreatedResults();
+    else await refreshLibrary();
     setStatus(`已更新标签: ${nextTags.join(", ") || "(空)"}`);
   };
 
@@ -2018,7 +2156,8 @@ export default function App() {
       sourceUrl: sourceDraft.trim(),
       notes: notesDraft.trim(),
     });
-    await refreshLibrary();
+    if (inCreated) await refreshCreatedResults();
+    else await refreshLibrary();
     setStatus("已保存出处 / 笔记");
   };
 
@@ -2031,8 +2170,9 @@ export default function App() {
       },
     });
     setSelected({ ...selected, folderId: nextFolderId });
-    await refreshLibrary();
-    setStatus(nextFolderId ? "已移入文件夹" : "已移出文件夹");
+    if (inCreated) await refreshCreatedResults();
+    else await refreshLibrary();
+    setStatus(nextFolderId ? "已移入分类" : "已移出分类");
   };
 
   const onDeleteAsset = useCallback(async () => {
@@ -2047,7 +2187,8 @@ export default function App() {
         deleteFiles: true,
       });
       setSelected(null);
-      await refreshLibrary();
+      if (inCreated) await refreshCreatedResults();
+      else await refreshLibrary();
       setStatus(
         result.deleted
           ? `已删除 · 清理文件 ${result.filesRemoved}`
@@ -2056,7 +2197,7 @@ export default function App() {
     } catch (e) {
       setStatus(`删除失败: ${e}`);
     }
-  }, [selected, refreshLibrary]);
+  }, [selected, refreshLibrary, refreshCreatedResults, mode]);
 
   const onDragAsset = async (asset: Asset, e: MouseEvent) => {
     e.preventDefault();
@@ -2200,6 +2341,7 @@ export default function App() {
         },
       });
       setGenFilterId(job.id);
+      setGenerateView("generate");
       await refreshGenerateResults(job.id);
       setStatus(
         `已生成 job=${job.id} · ${job.provider} · ${job.outputPaths?.length ?? 0} 张，尚未入库` +
@@ -2212,6 +2354,207 @@ export default function App() {
       setBusy(false);
     }
   };
+
+  const applyPromptPreset = (preset: PromptPreset) => {
+    setGenPrompt(preset.body);
+    setAppliedPromptId(preset.id);
+    setGenerateView("generate");
+    setPickedGen(null);
+    console.info("[inspirex]", { event: "prompt_preset_use", id: preset.id });
+    setStatus(`已填入「${preset.name}」，可生成`);
+  };
+
+  const resetPromptForm = () => {
+    setEditingPromptId(null);
+    setPromptName("");
+    setPromptBody("");
+    setPromptImagePath(null);
+    setPromptFormCategoryId(promptCategoryId);
+    setPromptFormOpen(false);
+  };
+
+  const openAddPromptForm = () => {
+    setEditingPromptId(null);
+    setPromptName("");
+    setPromptBody("");
+    setPromptImagePath(null);
+    setPromptFormCategoryId(promptCategoryId);
+    setPromptFormOpen(true);
+    console.info("[inspirex]", { event: "prompt_form_open", mode: "create" });
+  };
+
+  const bindPromptImage = (path: string) => {
+    setPromptImagePath(path);
+    console.info("[inspirex]", { event: "prompt_image_bind", path });
+    setStatus(`已关联图片 ${fileBaseName(path)}`);
+  };
+
+  const onPickPromptImage = async () => {
+    try {
+      const pickedFiles = await pickFiles(["png", "jpg", "jpeg", "webp", "gif"]);
+      if (pickedFiles.ok) {
+        if (pickedFiles.paths[0]) bindPromptImage(pickedFiles.paths[0]);
+        return;
+      }
+      if (pickedFiles.reason === "cancel") return;
+      console.info("[inspirex]", {
+        event: "folder_picker_open",
+        purpose: "prompt-image",
+        kind: "local",
+      });
+      setFolderPicker({ purpose: "prompt-image", kind: "local" });
+      setStatus("在弹窗里选择参考图");
+    } catch (e) {
+      setStatus(`选择图片失败: ${e}`);
+    }
+  };
+
+  const onMinePromptFromImage = async () => {
+    if (!promptImagePath) {
+      setStatus("请先选择参考图");
+      return;
+    }
+    setBusy(true);
+    setStatus("正在根据参考图挖掘提示词…");
+    console.info("[inspirex]", { event: "prompt_mine_start", path: promptImagePath });
+    try {
+      const mined = await invoke<MinedPrompt>("mine_prompt_from_image", {
+        path: promptImagePath,
+      });
+      if (mined.name.trim()) setPromptName(mined.name.trim());
+      if (mined.body.trim()) setPromptBody(mined.body.trim());
+      console.info("[inspirex]", {
+        event: "prompt_mine_ok",
+        provider: mined.provider,
+        nameLen: mined.name.length,
+        bodyLen: mined.body.length,
+      });
+      setStatus(`已挖掘「${mined.name || "提示词"}」（${mined.provider}）`);
+    } catch (e) {
+      console.warn("[inspirex]", { event: "prompt_mine_fail", err: String(e) });
+      setStatus(`挖掘失败: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onSavePromptPreset = async () => {
+    const body = promptBody.trim();
+    if (!body) {
+      setStatus("请填写提示词");
+      return;
+    }
+    setBusy(true);
+    try {
+      if (editingPromptId) {
+        const updated = await invoke<PromptPreset>("update_prompt_preset", {
+          req: {
+            id: editingPromptId,
+            name: promptName.trim(),
+            body,
+            imagePath: promptImagePath,
+            categoryId: promptFormCategoryId,
+          },
+        });
+        setStatus(`已更新「${updated.name}」`);
+      } else {
+        const created = await invoke<PromptPreset>("create_prompt_preset", {
+          req: {
+            name: promptName.trim(),
+            body,
+            imagePath: promptImagePath,
+            categoryId: promptFormCategoryId,
+          },
+        });
+        setStatus(`已保存「${created.name}」`);
+      }
+      setPromptName("");
+      setPromptBody("");
+      setPromptImagePath(null);
+      setEditingPromptId(null);
+      setPromptFormCategoryId(promptCategoryId);
+      setPromptFormOpen(false);
+      await refreshPromptPresets();
+      await refreshPromptCategories();
+    } catch (e) {
+      setStatus(`保存失败: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onSaveCurrentAsPreset = async () => {
+    const body = genPrompt.trim();
+    if (!body) {
+      setStatus("请先填写描述");
+      return;
+    }
+    const name = window.prompt("常用 prompt 名称", body.slice(0, 24))?.trim();
+    if (!name) return;
+    setBusy(true);
+    try {
+      const created = await invoke<PromptPreset>("create_prompt_preset", {
+        req: { name, body },
+      });
+      await refreshPromptPresets();
+      setAppliedPromptId(created.id);
+      console.info("[inspirex]", { event: "prompt_preset_create", id: created.id, from: "generate" });
+      setStatus(`已保存常用 prompt「${created.name}」`);
+    } catch (e) {
+      setStatus(`保存失败: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDeletePromptPreset = async (preset: PromptPreset) => {
+    if (!window.confirm(`删除常用 prompt「${preset.name}」？`)) return;
+    await invoke("delete_prompt_preset", { presetId: preset.id });
+    if (editingPromptId === preset.id) {
+      setEditingPromptId(null);
+      setPromptName("");
+      setPromptBody("");
+      setPromptImagePath(null);
+      setPromptFormCategoryId(promptCategoryId);
+      setPromptFormOpen(false);
+    }
+    if (appliedPromptId === preset.id) setAppliedPromptId(null);
+    await refreshPromptPresets();
+    await refreshPromptCategories();
+    setStatus(`已删除「${preset.name}」`);
+  };
+
+  const onCreatePromptCategory = async () => {
+    const name = window.prompt("prompt 分类名称")?.trim();
+    if (!name) return;
+    try {
+      const cat = await invoke<PromptCategory>("create_prompt_category", { name });
+      await refreshPromptCategories();
+      setGenerateView("prompt");
+      setPromptCategoryId(cat.id);
+      setPromptFormCategoryId(cat.id);
+      console.info("[inspirex]", { event: "prompt_category_create", id: cat.id });
+      setStatus(`已创建分类「${cat.name}」`);
+    } catch (e) {
+      setStatus(`创建分类失败: ${e}`);
+    }
+  };
+
+  const onDeletePromptCategory = async (cat: PromptCategory, e: MouseEvent) => {
+    e.stopPropagation();
+    if (!window.confirm(`删除分类「${cat.name}」？其中的 prompt 会回到未分类，不会删除。`)) return;
+    await invoke("delete_prompt_category", { categoryId: cat.id });
+    if (promptCategoryId === cat.id) setPromptCategoryId(null);
+    if (promptFormCategoryId === cat.id) setPromptFormCategoryId(null);
+    await refreshPromptCategories();
+    await refreshPromptPresets();
+    setStatus(`已删除分类「${cat.name}」`);
+  };
+
+  const visiblePromptPresets = useMemo(() => {
+    if (!promptCategoryId) return promptPresets;
+    return promptPresets.filter((p) => p.categoryId === promptCategoryId);
+  }, [promptPresets, promptCategoryId]);
 
   const importableJob = useMemo(() => {
     const selected = genJobs.find((j) => j.id === genFilterId);
@@ -2242,9 +2585,16 @@ export default function App() {
       });
       setGenFilterId(job.id);
       setPickedGen(null);
-      await refreshGenerateResults(job.id);
+      setGenerateView("created");
+      await refreshCreatedResults();
+      console.info("[inspirex]", {
+        event: "gen_imported_to_library",
+        job_id: job.id,
+        imported: job.imported,
+      });
       setStatus(
-        `入库完成 job=${job.id} · ${job.imported} 张` + (job.error ? ` · ${job.error}` : ""),
+        `入库完成 job=${job.id} · ${job.imported} 张，已出现在 AI作品集 与全部素材` +
+          (job.error ? ` · ${job.error}` : ""),
       );
     } catch (e) {
       await refreshGenerateResults(genFilterId);
@@ -2429,13 +2779,31 @@ export default function App() {
     if (viewFolderId) {
       const f = folders.find((x) => x.id === viewFolderId);
       const n = folderAssets.length + folderMedia.length;
-      return `虚拟文件夹 · ${f?.name ?? ""} · ${n} 项（不复制原文件）`;
+      return `分类 · ${f?.name ?? ""} · ${n} 项（不复制原文件）`;
     }
     if (mode === "subscribe") {
       return `订阅源 ${sources.length} 条${tagFilter ? ` · 标签 ${tagFilter}` : ""} · 拉取后走同一入库管道`;
     }
+    if (mode === "settings") {
+      return "AI 服务 · 文本 / 图片 / 视频";
+    }
+    if (mode === "generate" && generateView === "created") {
+      return `AI作品集 · 入库 ${assets.length}${tagFilter ? ` · 标签 ${tagFilter}` : ""}（亦在全部素材中）`;
+    }
+    if (mode === "created") {
+      return `AI创作 · 入库 ${assets.length}${tagFilter ? ` · 标签 ${tagFilter}` : ""}（亦在全部素材中）`;
+    }
     if (mode === "generate") {
-      return `AI 生图 · provider=${info?.imageGenProvider ?? "mock"}${tagFilter ? ` · 标签 ${tagFilter}` : ""}`;
+      if (generateView === "prompt") {
+        const cat = promptCategoryId
+          ? promptCategories.find((c) => c.id === promptCategoryId)
+          : null;
+        const n = promptCategoryId
+          ? promptPresets.filter((p) => p.categoryId === promptCategoryId).length
+          : promptPresets.length;
+        return cat ? `常用 prompt · ${cat.name} · ${n} 条` : `常用 prompt · ${n} 条`;
+      }
+      return `AI生图 · provider=${info?.imageGenProvider ?? "mock"}`;
     }
     if (mode === "browse") {
       const n = browseSelected.size;
@@ -2472,7 +2840,79 @@ export default function App() {
     colorFilter,
     sources.length,
     libraryMediaTotal,
+    assets.length,
+    generateView,
+    promptPresets.length,
+    promptCategories,
+    promptCategoryId,
   ]);
+
+  const currentModule = appModule(mode);
+  const sidebarModule =
+    currentModule === "settings"
+      ? lastNavModule
+      : currentModule === "generate"
+        ? "generate"
+        : "library";
+  const libraryModuleHref =
+    currentModule === "library" ? routeHref : lastLibraryHref || PATHS.library;
+  const generateModuleHref = toHref({
+    mode: "generate",
+    browseKind,
+    viewFolderId: null,
+    browsePath: null,
+    tagFilter: null,
+    colorFilter: null,
+    generateView,
+    promptCategoryId,
+  });
+
+  const goLibraryModule = (e: MouseEvent<HTMLAnchorElement>) => {
+    spaNav(e, () => {
+      if (currentModule === "library") return;
+      const parsed = parseAppHref(lastLibraryHref || PATHS.library);
+      const next =
+        appModule(parsed.mode) === "library"
+          ? parsed
+          : parseAppHref(PATHS.library);
+      const href = toHref(next);
+      console.info("[inspirex]", { event: "module_switch", module: "library", href });
+      setMode(next.mode);
+      setBrowseKind(next.browseKind);
+      setViewFolderId(next.viewFolderId);
+      setTagFilter(next.tagFilter);
+      setColorFilter(next.colorFilter);
+      setPicked(null);
+      setSelected(null);
+      setStatus("");
+      if (next.browsePath) {
+        setBrowsePath(next.browsePath);
+      } else if (next.mode === "browse") {
+        setBrowsePath(
+          defaultBrowsePath(next.browseKind, {
+            volumes: volumesRoot,
+            local: localRoot,
+            hub: hubRoot,
+          }),
+        );
+      }
+    });
+  };
+
+  const goGenerateModule = (e: MouseEvent<HTMLAnchorElement>) => {
+    spaNav(e, () => {
+      if (mode === "generate") return;
+      console.info("[inspirex]", { event: "module_switch", module: "generate", view: generateView });
+      setMode("generate");
+      setViewFolderId(null);
+      setSelected(null);
+      setPicked(null);
+      setPickedGen(null);
+      setTagFilter(null);
+      setColorFilter(null);
+      setStatus("");
+    });
+  };
 
   return (
     <div className={`app ${detailOpen ? "app-detail-open" : ""}`}>
@@ -2482,6 +2922,9 @@ export default function App() {
           <div className="brand-sub">InspireX</div>
         </div>
 
+        <div className="sidebar-nav">
+        {sidebarModule === "library" ? (
+        <>
         <a
           className={`nav-item ${
             mode === "library" && !viewFolderId && folderId === null && !tagFilter && !colorFilter
@@ -2579,18 +3022,21 @@ export default function App() {
           订阅源
         </a>
         <a
-          className={`nav-item ${mode === "generate" && !viewFolderId ? "active" : ""}`}
-          href={PATHS.generate}
+          className={`nav-item ${mode === "created" && !viewFolderId ? "active" : ""}`}
+          href={PATHS.created}
           onClick={(e) =>
             spaNav(e, () => {
-              setMode("generate");
+              setMode("created");
               setViewFolderId(null);
               setSelected(null);
               setPicked(null);
+              setFolderId(null);
+              setColorFilter(null);
+              setStatus("");
             })
           }
         >
-          AI 生图
+          AI创作
         </a>
 
         {mode === "browse" ? (
@@ -2683,7 +3129,7 @@ export default function App() {
         ) : null}
 
         <div className="nav-label">
-          文件夹
+          分类
           <button
             type="button"
             className="linkish"
@@ -2890,10 +3336,139 @@ export default function App() {
                 </div>
               );
             })}
+        </>
+        ) : (
+        <>
+          <div className={`nav-row ${generateView === "prompt" && !promptCategoryId ? "active" : ""}`}>
+            <a
+              className={`nav-item ${generateView === "prompt" && !promptCategoryId ? "active" : ""}`}
+              href={PATHS.generatePrompt}
+              onClick={(e) =>
+                spaNav(e, () => {
+                  setGenerateView("prompt");
+                  setPromptCategoryId(null);
+                  setPromptFormCategoryId(null);
+                  setPromptFormOpen(false);
+                  setEditingPromptId(null);
+                  setPickedGen(null);
+                  setSelected(null);
+                  setPicked(null);
+                })
+              }
+            >
+              prompt
+            </a>
+            <button
+              type="button"
+              className="nav-tag-apply nav-add-always"
+              title="新建 prompt 分类"
+              aria-label="新建 prompt 分类"
+              onClick={onCreatePromptCategory}
+            >
+              +
+            </button>
+          </div>
+          {promptCategories.map((c) => (
+            <div
+              key={c.id}
+              className={`nav-row nav-sub ${generateView === "prompt" && promptCategoryId === c.id ? "active" : ""}`}
+            >
+              <a
+                className="nav-item"
+                href={promptCategoryPath(c.id)}
+                onClick={(e) =>
+                  spaNav(e, () => {
+                    setGenerateView("prompt");
+                    setPromptCategoryId(c.id);
+                    if (!editingPromptId) setPromptFormCategoryId(c.id);
+                    setPromptFormOpen(false);
+                    setPickedGen(null);
+                    setSelected(null);
+                    setPicked(null);
+                  })
+                }
+              >
+                {c.name}
+                {c.itemCount ? <span className="nav-count">{c.itemCount}</span> : null}
+              </a>
+              <button
+                type="button"
+                className="nav-del"
+                title="删除分类（不删 prompt）"
+                aria-label={`删除分类 ${c.name}`}
+                onClick={(e) => onDeletePromptCategory(c, e)}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <a
+            className={`nav-item ${generateView === "generate" ? "active" : ""}`}
+            href={PATHS.generate}
+            onClick={(e) =>
+              spaNav(e, () => {
+                setGenerateView("generate");
+                setSelected(null);
+                setPicked(null);
+              })
+            }
+          >
+            AI生图
+          </a>
+          <a
+            className={`nav-item ${generateView === "created" ? "active" : ""}`}
+            href={PATHS.generateCreated}
+            onClick={(e) =>
+              spaNav(e, () => {
+                setGenerateView("created");
+                setPickedGen(null);
+                setSelected(null);
+                setPicked(null);
+                setStatus("");
+              })
+            }
+          >
+            AI作品集
+          </a>
+        </>
+        )}
+        </div>
+        <a
+          className={`nav-item sidebar-settings ${mode === "settings" ? "active" : ""}`}
+          href={PATHS.settings}
+          onClick={(e) =>
+            spaNav(e, () => {
+              setMode("settings");
+              setViewFolderId(null);
+              setSelected(null);
+              setPicked(null);
+              setPickedGen(null);
+              setStatus("");
+            })
+          }
+        >
+          设置
+        </a>
       </aside>
 
       <main className="main">
         <header className="toolbar">
+          <nav className="module-tabs" aria-label="一级模块">
+            <a
+              className={`module-tab ${currentModule === "library" ? "active" : ""}`}
+              href={libraryModuleHref}
+              onClick={goLibraryModule}
+            >
+              素材管理
+            </a>
+            <a
+              className={`module-tab ${currentModule === "generate" ? "active" : ""}`}
+              href={generateModuleHref}
+              onClick={goGenerateModule}
+            >
+              AI 生图
+            </a>
+          </nav>
           {viewFolderId ? (
             <div className="crumbs">
               <a
@@ -2912,7 +3487,7 @@ export default function App() {
               </a>
               <span className="crumb-sep">/</span>
               <span className="crumb">
-                {folders.find((f) => f.id === viewFolderId)?.name ?? "文件夹"}
+                {folders.find((f) => f.id === viewFolderId)?.name ?? "分类"}
               </span>
             </div>
           ) : mode === "browse" ? (
@@ -2944,10 +3519,20 @@ export default function App() {
               ))}
             </div>
           ) : null}
-          {viewFolderId ? null : mode === "subscribe" || mode === "generate" ? (
+          {viewFolderId ? null : mode === "settings" ? (
+            <div className="search-row">
+              <div className="panel-title">设置</div>
+            </div>
+          ) : mode === "subscribe" || (mode === "generate" && generateView !== "created") ? (
             <div className="search-row">
               <div className="panel-title">
-                {mode === "subscribe" ? "订阅 / RSS" : "AI 生图"}
+                {mode === "subscribe"
+                  ? "订阅 / RSS"
+                  : generateView === "prompt"
+                    ? promptCategoryId
+                      ? promptCategories.find((c) => c.id === promptCategoryId)?.name ?? "常用 prompt"
+                      : "常用 prompt"
+                    : "AI生图"}
               </div>
               {mode === "subscribe" ? (
                 <button
@@ -2960,15 +3545,36 @@ export default function App() {
                 >
                   刷新
                 </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => refreshGenerateResults(genFilterId)}
-                  disabled={busy}
-                >
-                  刷新结果
-                </button>
-              )}
+              ) : generateView === "prompt" ? (
+                <>
+                  {promptFormOpen ? (
+                    <button type="button" onClick={resetPromptForm}>
+                      取消
+                    </button>
+                  ) : null}
+                  <button type="button" className="primary" onClick={openAddPromptForm}>
+                    添加
+                  </button>
+                </>
+              ) : generateView === "generate" ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => refreshGenerateResults(genFilterId)}
+                    disabled={busy}
+                  >
+                    刷新结果
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={busy || !importableJob}
+                    onClick={() => onImportGen()}
+                  >
+                    入库
+                  </button>
+                </>
+              ) : null}
             </div>
           ) : (
             <div className="search-row">
@@ -2984,7 +3590,7 @@ export default function App() {
                       : "文件名 / 标签全文搜索…"
                 }
               />
-              {mode === "library" ? (
+              {mode === "library" || inCreated ? (
                 <label className="clip-toggle">
                   <input
                     type="checkbox"
@@ -3006,6 +3612,14 @@ export default function App() {
                     追加文件夹
                   </button>
                 </>
+              ) : inCreated ? (
+                <button
+                  type="button"
+                  onClick={() => refreshCreatedResults().catch((e) => setStatus(String(e)))}
+                  disabled={busy}
+                >
+                  刷新
+                </button>
               ) : (
                 <>
                   {browseKind === "hub" ? (
@@ -3059,7 +3673,11 @@ export default function App() {
                 value={pathDraft}
                 onChange={(e) => setPathDraft(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && onConfirmPathAsk()}
-                placeholder="文件绝对路径，逗号或换行分隔"
+                placeholder={
+                  pathAsk === "prompt-image"
+                    ? "参考图绝对路径"
+                    : "文件绝对路径，逗号或换行分隔"
+                }
                 autoFocus
               />
               <button type="button" className="primary" onClick={onConfirmPathAsk} disabled={busy}>
@@ -3076,16 +3694,16 @@ export default function App() {
               </button>
             </div>
           ) : null}
-          {status ? <div className="status">{status}</div> : null}
+          {status && status !== headerMeta ? <div className="status">{status}</div> : null}
         </header>
 
         {viewFolderId ? (
           <section className="grid">
             {folderMedia.length === 0 && folderAssets.length === 0 ? (
               <div className="empty">
-                <p>这个文件夹还是空的。</p>
+                <p>这个分类还是空的。</p>
                 <p className="hint">
-                  勾选图片后点侧栏文件夹旁的 +，即可虚拟放入（不复制、不移动原文件）。
+                  勾选图片后点侧栏分类旁的 +，即可虚拟放入（不复制、不移动原文件）。
                 </p>
               </div>
             ) : (
@@ -3098,7 +3716,7 @@ export default function App() {
                     <button
                       type="button"
                       className="card-remove"
-                      title="从文件夹移出（不删原文件）"
+                      title="从分类移出（不删原文件）"
                       aria-label={`移出 ${m.name}`}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -3129,7 +3747,7 @@ export default function App() {
                     <button
                       type="button"
                       className="card-remove"
-                      title="从文件夹移出（不删原文件）"
+                      title="从分类移出（不删原文件）"
                       aria-label={`移出 ${a.filename}`}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -3334,6 +3952,15 @@ export default function App() {
               </>
             )}
           </section>
+        ) : mode === "settings" ? (
+          <SettingsPanel
+            onSaved={() => {
+              invoke<LibraryInfo>("get_library_info")
+                .then(setInfo)
+                .catch(() => undefined);
+              setStatus("已保存 AI 服务配置");
+            }}
+          />
         ) : mode === "subscribe" ? (
           <section className="panel panel-split">
             <div className="panel-left">
@@ -3387,7 +4014,7 @@ export default function App() {
                   />
                 </label>
                 <label className="tag-label">
-                  入库文件夹
+                  入库分类
                   <select
                     value={folderId || ""}
                     onChange={(e) => setFolderId(e.target.value || null)}
@@ -3513,16 +4140,225 @@ export default function App() {
               </section>
             </div>
           </section>
-        ) : mode === "generate" ? (
+        ) : mode === "generate" && generateView === "prompt" ? (
+          <section className="panel">
+            {promptFormOpen ? (
+            <div className="form-card">
+              <div className="prompt-form-layout">
+                <div className="prompt-form-fields">
+              <label className="tag-label">
+                名称
+                <input
+                  value={promptName}
+                  onChange={(e) => setPromptName(e.target.value)}
+                  placeholder="例如 暖色静物"
+                />
+              </label>
+              <label className="tag-label">
+                分类
+                <select
+                  value={promptFormCategoryId || ""}
+                  onChange={(e) => setPromptFormCategoryId(e.target.value || null)}
+                >
+                  <option value="">（未分类）</option>
+                  {promptCategories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="tag-label">
+                提示词
+                <textarea
+                  rows={5}
+                  value={promptBody}
+                  onChange={(e) => setPromptBody(e.target.value)}
+                  placeholder="例如：暖色陶罐静物，侧光，胶片质感"
+                />
+              </label>
+                </div>
+                <div className="prompt-image-pane">
+                  <div className="prompt-image-label">图片</div>
+                  <div
+                    className={`prompt-image-frame${promptImagePath ? "" : " prompt-image-empty"}`}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const files = Array.from(e.dataTransfer.files);
+                      const path = files
+                        .map((f) => (f as File & { path?: string }).path)
+                        .find((p): p is string => Boolean(p));
+                      if (path) bindPromptImage(path);
+                      else setStatus("拖入失败：拿不到文件路径，请点「选择图片」");
+                    }}
+                  >
+                    {promptImagePath ? (
+                      <img
+                        src={convertFileSrc(promptImagePath)}
+                        alt={fileBaseName(promptImagePath)}
+                        onError={() => {
+                          console.warn("[inspirex]", {
+                            event: "prompt_image_preview_fail",
+                            path: promptImagePath,
+                          });
+                          setStatus("参考图无法显示，请确认文件仍在原位置");
+                        }}
+                      />
+                    ) : (
+                      <span>选择或拖入参考图，与这条提示词关联</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <p className="hint">集中管理常用生图提示词。保存后可在「AI生图」一键填入。图片只链接原文件，不另存副本。</p>
+              <div className="prompt-form-footer">
+                <div className="form-actions">
+                  <button type="button" className="primary" disabled={busy} onClick={onSavePromptPreset}>
+                    {editingPromptId ? "保存修改" : "保存"}
+                  </button>
+                  <button type="button" onClick={resetPromptForm}>
+                    取消
+                  </button>
+                </div>
+                <div className="form-actions">
+                  <button type="button" onClick={onPickPromptImage} disabled={busy}>
+                    选择图片
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onMinePromptFromImage}
+                    disabled={busy || !promptImagePath}
+                    title="根据参考图逆向生成名称和提示词"
+                  >
+                    挖掘
+                  </button>
+                  {promptImagePath ? (
+                    <button type="button" onClick={() => setPromptImagePath(null)}>
+                      清除
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+            ) : visiblePromptPresets.length === 0 ? (
+              <div className="empty">
+                <p>
+                  {promptPresets.length === 0
+                    ? "还没有常用 prompt。点右上角「添加」，写入提示词并配参考图。"
+                    : "这个分类还没有 prompt。点「添加」写入，或先看全部。"}
+                </p>
+              </div>
+            ) : (
+              <section className="grid result-grid">
+              {visiblePromptPresets.map((p) => (
+                <div
+                  key={p.id}
+                  className={`card prompt-tile ${editingPromptId === p.id ? "card-active" : ""}`}
+                >
+                  <button
+                    type="button"
+                    className="card-body"
+                    onClick={() => applyPromptPreset(p)}
+                    title="用于生图"
+                  >
+                    <div className="prompt-tile-image">
+                      {p.imagePath ? (
+                        <img src={convertFileSrc(p.imagePath)} alt={p.name} />
+                      ) : (
+                        <span className="prompt-tile-ph">{p.name.slice(0, 2) || "P"}</span>
+                      )}
+                    </div>
+                    <div className="card-meta prompt-tile-caption">
+                      <span className="name">{p.name}</span>
+                      <span className="prompt-tile-text">{p.body}</span>
+                    </div>
+                  </button>
+                  <div className="prompt-tile-actions">
+                    <button
+                      type="button"
+                      title="编辑"
+                      onClick={() => {
+                        setEditingPromptId(p.id);
+                        setPromptName(p.name);
+                        setPromptBody(p.body);
+                        setPromptImagePath(p.imagePath || null);
+                        setPromptFormCategoryId(p.categoryId || null);
+                        setPromptFormOpen(true);
+                      }}
+                    >
+                      编辑
+                    </button>
+                    <button
+                      type="button"
+                      className="danger"
+                      title="删除"
+                      onClick={() => onDeletePromptPreset(p)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              ))}
+              </section>
+            )}
+          </section>
+        ) : mode === "generate" && generateView !== "created" ? (
           <section className="panel panel-split">
             <div className="panel-left">
             <div className="form-card">
+              {promptPresets.length > 0 ? (
+                <label className="tag-label">
+                  常用 prompt
+                  <select
+                    value={appliedPromptId || ""}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      if (!id) {
+                        setAppliedPromptId(null);
+                        return;
+                      }
+                      const preset = promptPresets.find((x) => x.id === id);
+                      if (preset) applyPromptPreset(preset);
+                    }}
+                  >
+                    <option value="">（直接填写）</option>
+                    {promptCategories.map((c) => {
+                      const items = promptPresets.filter((p) => p.categoryId === c.id);
+                      if (items.length === 0) return null;
+                      return (
+                        <optgroup key={c.id} label={c.name}>
+                          {items.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      );
+                    })}
+                    {promptPresets.filter((p) => !p.categoryId).length > 0 ? (
+                      <optgroup label={promptCategories.length ? "未分类" : "常用 prompt"}>
+                        {promptPresets
+                          .filter((p) => !p.categoryId)
+                          .map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name}
+                            </option>
+                          ))}
+                      </optgroup>
+                    ) : null}
+                  </select>
+                </label>
+              ) : null}
               <label className="tag-label">
                 描述
                 <textarea
                   rows={4}
                   value={genPrompt}
-                  onChange={(e) => setGenPrompt(e.target.value)}
+                  onChange={(e) => {
+                    setGenPrompt(e.target.value);
+                    setAppliedPromptId(null);
+                  }}
                   placeholder="例如：暖色陶罐静物，侧光，胶片质感"
                 />
               </label>
@@ -3547,7 +4383,7 @@ export default function App() {
                   </select>
                 </label>
                 <label className="tag-label">
-                  入库文件夹
+                  入库分类
                   <select
                     value={folderId || ""}
                     onChange={(e) => setFolderId(e.target.value || null)}
@@ -3563,10 +4399,10 @@ export default function App() {
               </div>
               <p className="hint">
                 {info?.imageGenProvider === "minimax"
-                  ? "当前 MiniMax image-01。先生成预览，确认后再入库。"
+                  ? "当前 MiniMax。先生成预览，确认后再入库。服务商可在侧栏「设置」更改。"
                   : info?.imageGenProvider === "openai_compat"
-                    ? "当前 OpenAI 兼容 Images API。先生成，再入库。"
-                    : "当前 mock。先生成占位图，再入库。"}
+                    ? "当前 OpenAI 兼容 Images API。先生成，再入库。服务商可在侧栏「设置」更改。"
+                    : "当前 mock。先生成占位图，再入库。侧栏「设置」可配置真实生图服务。"}
               </p>
               <div className="form-actions">
                 <button type="button" className="primary" disabled={busy} onClick={onGenerate}>
@@ -3579,47 +4415,11 @@ export default function App() {
                 >
                   入库
                 </button>
+                <button type="button" disabled={busy || !genPrompt.trim()} onClick={onSaveCurrentAsPreset}>
+                  保存为常用
+                </button>
               </div>
             </div>
-            {genJobs.length === 0 ? (
-              <div className="empty">
-                <p>还没有生图任务。</p>
-              </div>
-            ) : (
-              genJobs.map((j) => (
-                <div
-                  key={j.id}
-                  className={`job-row ${genFilterId === j.id ? "source-card-active" : ""}`}
-                  onClick={() => {
-                    setGenFilterId(j.id);
-                    setPickedGen(null);
-                  }}
-                >
-                  <div>
-                    <div className="name">{j.prompt}</div>
-                    <div className="hint">
-                      {jobStatusLabel(j.status)} · {j.provider}/{j.model} · n={j.n}
-                      {j.status === "done" ? ` · 入库 ${j.imported}` : ""}
-                      {j.status === "generated" ? ` · ${j.outputPaths?.length ?? 0} 张待入库` : ""}
-                      {j.error ? ` · ${j.error}` : ""}
-                    </div>
-                  </div>
-                  <div className="source-actions" onClick={(e) => e.stopPropagation()}>
-                    {j.status === "generated" ? (
-                      <button
-                        type="button"
-                        className="primary"
-                        disabled={busy}
-                        onClick={() => onImportGen(j.id)}
-                      >
-                        入库
-                      </button>
-                    ) : null}
-                    <span className="badge">{jobStatusLabel(j.status)}</span>
-                  </div>
-                </div>
-              ))
-            )}
             </div>
             <div className="panel-right">
               <div className="result-head">
@@ -3628,7 +4428,7 @@ export default function App() {
                   {pickedGen
                     ? ` · ${fileBaseName(pickedGen.path)}`
                     : genFilterId
-                      ? " · 本次任务"
+                      ? ` · 本次任务${genJob ? ` · ${jobStatusLabel(genJob.status)}` : ""}`
                       : " · 全部"}
                   {pickedGen
                     ? ""
@@ -3738,7 +4538,7 @@ export default function App() {
                             ? `没有带「${tagFilter}」标签的生成图。`
                             : genJob?.status === "generated"
                               ? "生成文件丢失，请重新生成。"
-                              : "先点「生成」预览，再点「入库」写入素材库。"}
+                              : "填写左侧描述并生成，再在这里预览、入库。"}
                         </p>
                       </div>
                 ) : (
@@ -3779,10 +4579,16 @@ export default function App() {
               <div className="empty">
                 <p>
                   {tagFilter
-                    ? `没有带「${tagFilter}」标签的素材。点开一张图，再点标签旁 + 即可贴上。`
-                    : "还没有可展示的图片。外置卷 / 本地库 / 中转站用「追加文件夹」绑定后会显示在这里；订阅、插件、AI 生图入库后也会出现。"}
+                    ? `没有带「${tagFilter}」标签的${mode === "generate" && generateView === "created" ? "AI作品" : inCreated ? "AI创作" : "素材"}。点开一张图，再点标签旁 + 即可贴上。`
+                    : inCreated
+                      ? mode === "generate" && generateView === "created"
+                        ? "还没有入库的 AI 作品。在 AI生图 生成并入库后，会出现在这里和全部素材。"
+                        : "还没有入库的 AI 创作。在 AI生图 生成并入库后，会出现在这里和全部素材。"
+                      : "还没有可展示的图片。外置卷 / 本地库 / 中转站用「追加文件夹」绑定后会显示在这里；订阅、插件、AI创作入库后也会出现。"}
                 </p>
+                {inCreated ? null : (
                 <p className="hint">外置卷 / 本地库 / 中转站只链接原文件，不另存副本</p>
+                )}
               </div>
             ) : (
               <>
@@ -3895,7 +4701,7 @@ export default function App() {
               取消选择
             </button>
             <span className="selection-hint">
-              点文件夹旁 + 可虚拟放入 · 点标签旁 + 可贴标签 · Esc 取消
+              点分类旁 + 可虚拟放入 · 点标签旁 + 可贴标签 · Esc 取消
             </span>
           </div>
         ) : null}
@@ -4057,7 +4863,7 @@ export default function App() {
           </dl>
 
           <label className="tag-label">
-            文件夹
+            分类
             <select
               value={selected.folderId || ""}
               onChange={(e) => onMoveFolder(e.target.value || null)}
@@ -4117,6 +4923,7 @@ export default function App() {
           kind={folderPicker.kind}
           title={folderPickerCopy.title}
           confirmLabel={folderPickerCopy.confirmLabel}
+          pickFiles={folderPicker.purpose === "prompt-image"}
           onPick={onPickFolder}
           onCancel={() => {
             setFolderPicker(null);

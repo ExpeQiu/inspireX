@@ -1,3 +1,4 @@
+mod aisettings;
 mod browse;
 mod clip;
 mod commands;
@@ -8,6 +9,7 @@ mod ingest;
 mod library;
 mod models;
 mod pipeline;
+mod promptmine;
 mod rpc;
 mod subscribe;
 mod thumb;
@@ -24,6 +26,24 @@ fn env_flag(key: &str, default: bool) -> bool {
             t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
         }
         Err(_) => default,
+    }
+}
+
+/// 直接启动（图标 / `tauri dev` / 封装 App）默认显示窗口。
+/// `./scripts/start.sh` 会设 `INSPIREX_SHOW_WINDOW=false` 走浏览器主界面。
+fn show_native_window() -> bool {
+    env_flag("INSPIREX_SHOW_WINDOW", true)
+}
+
+fn reveal_main_window(app: &tauri::AppHandle) {
+    match app.get_webview_window("main") {
+        Some(w) => {
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+            log::info!(target: "inspirex", "ui_window_shown");
+        }
+        None => log::warn!(target: "inspirex", "ui_window_missing"),
     }
 }
 
@@ -83,7 +103,7 @@ pub fn run() {
     ingest::spawn_ingest_server(state.clone());
     subscribe::spawn_subscribe_poller(state.clone());
 
-    let show_window = env_flag("INSPIREX_SHOW_WINDOW", false);
+    let show_window = show_native_window();
     let ui_port = std::env::var("VITE_DEV_PORT").unwrap_or_else(|_| "1420".into());
     log::info!(
         target: "inspirex",
@@ -100,12 +120,14 @@ pub fn run() {
         .plugin(tauri_plugin_drag::init())
         .manage(state)
         .setup(move |app| {
-            if let Some(w) = app.get_webview_window("main") {
-                if show_window {
-                    let _ = w.show();
-                } else {
-                    let _ = w.hide();
-                }
+            if show_window {
+                reveal_main_window(&app.handle());
+            } else if let Some(w) = app.get_webview_window("main") {
+                let _ = w.hide();
+                log::info!(
+                    target: "inspirex",
+                    "ui_window_hidden; Dock/任务栏点击会显示原生窗口"
+                );
             }
             Ok(())
         })
@@ -155,7 +177,50 @@ pub fn run() {
             commands::generate_images,
             commands::import_gen_job,
             commands::list_gen_jobs,
+            commands::list_prompt_presets,
+            commands::mine_prompt_from_image,
+            commands::create_prompt_preset,
+            commands::update_prompt_preset,
+            commands::delete_prompt_preset,
+            commands::list_prompt_categories,
+            commands::create_prompt_category,
+            commands::delete_prompt_category,
+            commands::get_ai_settings,
+            commands::set_ai_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running InspireX");
+        .build(tauri::generate_context!())
+        .expect("error while building InspireX")
+        .run(|app, event| {
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
+                if !has_visible_windows {
+                    log::info!(target: "inspirex", "ui_reopen");
+                    reveal_main_window(app);
+                }
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn native_window_follows_env_with_on_by_default() {
+        let prev = std::env::var("INSPIREX_SHOW_WINDOW").ok();
+        std::env::remove_var("INSPIREX_SHOW_WINDOW");
+        assert!(
+            super::show_native_window(),
+            "直接启动应显示原生窗口"
+        );
+        std::env::set_var("INSPIREX_SHOW_WINDOW", "false");
+        assert!(!super::show_native_window());
+        std::env::set_var("INSPIREX_SHOW_WINDOW", "true");
+        assert!(super::show_native_window());
+        match prev {
+            Some(v) => std::env::set_var("INSPIREX_SHOW_WINDOW", v),
+            None => std::env::remove_var("INSPIREX_SHOW_WINDOW"),
+        }
+    }
 }

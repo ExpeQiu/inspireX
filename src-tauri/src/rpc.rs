@@ -13,8 +13,9 @@ use crate::db;
 use crate::finder_tags::{self, FinderTag, FinderTagValue};
 use crate::library::{asset_abs_path, delete_asset, import_paths, library_info, AppState};
 use crate::models::{
-    Asset, CreateSource, Folder, GenerateRequest, GenJob, IngestImportRequest, SearchQuery,
-    Source, Tag, UpdateAssetMeta,
+    Asset, CreatePromptPreset, CreateSource, Folder, GenerateRequest, GenJob, IngestImportRequest,
+    MinedPrompt, PromptCategory, PromptPreset, SearchQuery, Source, Tag, UpdateAssetMeta,
+    UpdatePromptPreset,
 };
 use crate::pipeline::{color_distance, cosine_similarity, parse_hex_color};
 use serde::de::DeserializeOwned;
@@ -199,6 +200,14 @@ struct BrowseDirArgs {
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
+struct PickerDirArgs {
+    path: Option<String>,
+    kind: Option<String>,
+    include_media: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
 struct BrowseByTagArgs {
     path: Option<String>,
     tag: String,
@@ -289,6 +298,59 @@ struct ImportGenArgs {
 #[serde(default, rename_all = "camelCase")]
 struct LimitArgs {
     limit: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct CreatePromptPresetArgs {
+    req: Option<CreatePromptPreset>,
+}
+
+impl Default for CreatePromptPreset {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            body: String::new(),
+            image_path: None,
+            category_id: None,
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct UpdatePromptPresetArgs {
+    req: Option<UpdatePromptPreset>,
+}
+
+impl Default for UpdatePromptPreset {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            body: String::new(),
+            image_path: None,
+            category_id: None,
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct PromptPresetIdArgs {
+    preset_id: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct CreatePromptCategoryArgs {
+    name: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct PromptCategoryIdArgs {
+    category_id: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -657,10 +719,14 @@ pub fn list_browse_dir(
     list_browse_for_kind(target, &kind, limit.unwrap_or(72), offset.unwrap_or(0))
 }
 
-pub fn list_picker_dir(path: Option<String>, kind: Option<String>) -> Result<ExternalListing, String> {
+pub fn list_picker_dir(
+    path: Option<String>,
+    kind: Option<String>,
+    include_media: Option<bool>,
+) -> Result<ExternalListing, String> {
     let kind = parse_browse_kind(kind.as_deref());
     let target = path.filter(|p| !p.trim().is_empty()).map(PathBuf::from);
-    browse_list_picker_dir(target.as_deref(), kind)
+    browse_list_picker_dir(target.as_deref(), kind, include_media.unwrap_or(false))
 }
 
 pub fn list_finder_tags() -> Vec<FinderTag> {
@@ -891,6 +957,170 @@ pub fn list_gen_jobs(state: &AppState, limit: Option<i64>) -> Result<Vec<GenJob>
     db::list_gen_jobs(&conn, limit.unwrap_or(50)).map_err(|e| e.to_string())
 }
 
+fn normalize_preset(name: &str, body: &str) -> Result<(String, String), String> {
+    let body = body.trim().to_string();
+    if body.is_empty() {
+        return Err("prompt 不能为空".into());
+    }
+    let name = if name.trim().is_empty() {
+        body.chars().take(24).collect()
+    } else {
+        name.trim().to_string()
+    };
+    Ok((name, body))
+}
+
+fn normalize_image_path(path: Option<String>) -> Option<String> {
+    path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn normalize_category_id(conn: &rusqlite::Connection, id: Option<String>) -> Result<Option<String>, String> {
+    let id = id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    if db::get_prompt_category(conn, &id)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Err(format!("分类不存在: {id}"));
+    }
+    Ok(Some(id))
+}
+
+pub fn list_prompt_presets(state: &AppState) -> Result<Vec<PromptPreset>, String> {
+    let conn = state.open_db().map_err(|e| e.to_string())?;
+    db::list_prompt_presets(&conn).map_err(|e| e.to_string())
+}
+
+pub fn mine_prompt_from_image(state: &AppState, path: String) -> Result<MinedPrompt, String> {
+    crate::promptmine::mine_from_image(state, path)
+}
+
+pub fn create_prompt_preset(state: &AppState, req: CreatePromptPreset) -> Result<PromptPreset, String> {
+    let (name, body) = normalize_preset(&req.name, &req.body)?;
+    let conn = state.open_db().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let preset = PromptPreset {
+        id: uuid::Uuid::new_v4().to_string(),
+        name,
+        body,
+        image_path: normalize_image_path(req.image_path),
+        category_id: normalize_category_id(&conn, req.category_id)?,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    db::insert_prompt_preset(&conn, &preset).map_err(|e| e.to_string())?;
+    log::info!(
+        target: "inspirex",
+        "prompt_preset_create id={} name_len={} body_len={}",
+        preset.id,
+        preset.name.len(),
+        preset.body.len()
+    );
+    Ok(preset)
+}
+
+pub fn update_prompt_preset(state: &AppState, req: UpdatePromptPreset) -> Result<PromptPreset, String> {
+    let id = req.id.trim();
+    if id.is_empty() {
+        return Err("preset_id 不能为空".into());
+    }
+    let (name, body) = normalize_preset(&req.name, &req.body)?;
+    let conn = state.open_db().map_err(|e| e.to_string())?;
+    let mut preset = db::get_prompt_preset(&conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("prompt 不存在: {id}"))?;
+    preset.name = name;
+    preset.body = body;
+    preset.image_path = normalize_image_path(req.image_path);
+    preset.category_id = normalize_category_id(&conn, req.category_id)?;
+    preset.updated_at = chrono::Utc::now().to_rfc3339();
+    db::update_prompt_preset(&conn, &preset).map_err(|e| e.to_string())?;
+    log::info!(
+        target: "inspirex",
+        "prompt_preset_update id={} body_len={}",
+        preset.id,
+        preset.body.len()
+    );
+    Ok(preset)
+}
+
+pub fn delete_prompt_preset(state: &AppState, preset_id: String) -> Result<bool, String> {
+    let conn = state.open_db().map_err(|e| e.to_string())?;
+    let ok = db::delete_prompt_preset(&conn, &preset_id).map_err(|e| e.to_string())?;
+    log::info!(
+        target: "inspirex",
+        "prompt_preset_delete id={} ok={}",
+        preset_id,
+        ok
+    );
+    Ok(ok)
+}
+
+pub fn list_prompt_categories(state: &AppState) -> Result<Vec<PromptCategory>, String> {
+    let conn = state.open_db().map_err(|e| e.to_string())?;
+    db::list_prompt_categories(&conn).map_err(|e| e.to_string())
+}
+
+pub fn create_prompt_category(state: &AppState, name: String) -> Result<PromptCategory, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("分类名称不能为空".into());
+    }
+    let cat = PromptCategory {
+        id: uuid::Uuid::new_v4().to_string(),
+        name,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        item_count: 0,
+    };
+    let conn = state.open_db().map_err(|e| e.to_string())?;
+    db::insert_prompt_category(&conn, &cat).map_err(|e| e.to_string())?;
+    log::info!(
+        target: "inspirex",
+        "prompt_category_create id={} name={}",
+        cat.id,
+        cat.name
+    );
+    Ok(cat)
+}
+
+pub fn delete_prompt_category(state: &AppState, category_id: String) -> Result<bool, String> {
+    let conn = state.open_db().map_err(|e| e.to_string())?;
+    let ok = db::delete_prompt_category(&conn, &category_id).map_err(|e| e.to_string())?;
+    log::info!(
+        target: "inspirex",
+        "prompt_category_delete id={} ok={}",
+        category_id,
+        ok
+    );
+    Ok(ok)
+}
+
+pub fn get_ai_settings(state: &AppState) -> crate::aisettings::AiServicesView {
+    let svc = state.ai.read().clone();
+    crate::aisettings::view_of(&svc, &state.ai_config_path)
+}
+
+pub fn set_ai_settings(
+    state: &AppState,
+    patch: crate::aisettings::AiServicesPatch,
+) -> Result<crate::aisettings::AiServicesView, String> {
+    let mut svc = state.ai.read().clone();
+    crate::aisettings::apply_patch(&mut svc, patch);
+    crate::aisettings::save(&state.ai_config_path, &svc)?;
+    *state.ai.write() = svc.clone();
+    log::info!(
+        target: "inspirex",
+        "ai_settings_save path={} text={} image={} video={}",
+        state.ai_config_path.display(),
+        crate::aisettings::effective_of(&svc.text.provider, &svc.text.api_key),
+        crate::aisettings::effective_of(&svc.image.provider, &svc.image.api_key),
+        crate::aisettings::effective_of(&svc.video.provider, &svc.video.api_key)
+    );
+    Ok(crate::aisettings::view_of(&svc, &state.ai_config_path))
+}
+
 /// 浏览器与其它 HTTP 客户端的统一入口。
 pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, String> {
     log::info!(target: "inspirex", "rpc_dispatch cmd={}", cmd);
@@ -995,20 +1225,38 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
         }
         "list_browse_dir" => {
             let a: BrowseDirArgs = parse(&args)?;
-            json_ok(list_browse_dir(a.path, a.limit, a.offset, a.kind)?)
+            let listing = list_browse_dir(a.path, a.limit, a.offset, a.kind)?;
+            crate::thumb::spawn_warmup(
+                state.library_path.clone(),
+                listing.media.iter().map(|m| m.path.clone()).collect(),
+                240,
+            );
+            json_ok(listing)
         }
         "list_picker_dir" => {
-            let a: BrowseDirArgs = parse(&args)?;
-            json_ok(list_picker_dir(a.path, a.kind)?)
+            let a: PickerDirArgs = parse(&args)?;
+            json_ok(list_picker_dir(a.path, a.kind, a.include_media)?)
         }
         "list_finder_tags" => json_ok(list_finder_tags()),
         "list_browse_by_tag" => {
             let a: BrowseByTagArgs = parse(&args)?;
-            json_ok(list_browse_by_tag(a.path, a.tag, a.limit, a.offset, a.kind)?)
+            let listing = list_browse_by_tag(a.path, a.tag, a.limit, a.offset, a.kind)?;
+            crate::thumb::spawn_warmup(
+                state.library_path.clone(),
+                listing.media.iter().map(|m| m.path.clone()).collect(),
+                240,
+            );
+            json_ok(listing)
         }
         "list_all_linked_media" => {
             let a: AllLinkedArgs = parse(&args)?;
-            json_ok(list_all_linked_media(a.tag, a.limit, a.offset)?)
+            let listing = list_all_linked_media(a.tag, a.limit, a.offset)?;
+            crate::thumb::spawn_warmup(
+                state.library_path.clone(),
+                listing.media.iter().map(|m| m.path.clone()).collect(),
+                240,
+            );
+            json_ok(listing)
         }
         "get_finder_tags" => {
             let a: PathArgs = parse(&args)?;
@@ -1057,6 +1305,37 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
             let a: LimitArgs = parse(&args)?;
             json_ok(list_gen_jobs(state, a.limit)?)
         }
+        "list_prompt_presets" => json_ok(list_prompt_presets(state)?),
+        "mine_prompt_from_image" => {
+            let a: PathArgs = parse(&args)?;
+            json_ok(mine_prompt_from_image(state, a.path)?)
+        }
+        "create_prompt_preset" => {
+            let a: CreatePromptPresetArgs = parse(&args)?;
+            json_ok(create_prompt_preset(state, a.req.unwrap_or_default())?)
+        }
+        "update_prompt_preset" => {
+            let a: UpdatePromptPresetArgs = parse(&args)?;
+            json_ok(update_prompt_preset(state, a.req.unwrap_or_default())?)
+        }
+        "delete_prompt_preset" => {
+            let a: PromptPresetIdArgs = parse(&args)?;
+            json_ok(delete_prompt_preset(state, a.preset_id)?)
+        }
+        "list_prompt_categories" => json_ok(list_prompt_categories(state)?),
+        "create_prompt_category" => {
+            let a: CreatePromptCategoryArgs = parse(&args)?;
+            json_ok(create_prompt_category(state, a.name)?)
+        }
+        "delete_prompt_category" => {
+            let a: PromptCategoryIdArgs = parse(&args)?;
+            json_ok(delete_prompt_category(state, a.category_id)?)
+        }
+        "get_ai_settings" => json_ok(get_ai_settings(state)),
+        "set_ai_settings" => {
+            let a: crate::aisettings::AiServicesPatch = parse(&args)?;
+            json_ok(set_ai_settings(state, a)?)
+        }
         other => Err(format!("未知命令: {other}")),
     }
 }
@@ -1095,6 +1374,71 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_prompt_preset_crud() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(dir.path().to_path_buf());
+        state.ensure_dirs().unwrap();
+        let created = dispatch(
+            &state,
+            "create_prompt_preset",
+            json!({"req": {"name": "静物", "body": "暖色陶罐静物", "imagePath": "/tmp/a.jpg"}}),
+        )
+        .unwrap();
+        assert_eq!(created["name"], "静物");
+        assert_eq!(created["imagePath"], "/tmp/a.jpg");
+        let id = created["id"].as_str().unwrap().to_string();
+        let listed = dispatch(&state, "list_prompt_presets", json!({})).unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        dispatch(
+            &state,
+            "update_prompt_preset",
+            json!({"req": {"id": id.clone(), "name": "静物", "body": "暖色陶罐", "imagePath": "/tmp/b.jpg"}}),
+        )
+        .unwrap();
+        let ok = dispatch(
+            &state,
+            "delete_prompt_preset",
+            json!({"presetId": id}),
+        )
+        .unwrap();
+        assert_eq!(ok, serde_json::json!(true));
+        let empty = dispatch(&state, "list_prompt_presets", json!({})).unwrap();
+        assert!(empty.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dispatch_prompt_category_and_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(dir.path().to_path_buf());
+        state.ensure_dirs().unwrap();
+        let cat = dispatch(
+            &state,
+            "create_prompt_category",
+            json!({"name": "静物"}),
+        )
+        .unwrap();
+        assert_eq!(cat["name"], "静物");
+        let cat_id = cat["id"].as_str().unwrap().to_string();
+        let created = dispatch(
+            &state,
+            "create_prompt_preset",
+            json!({"req": {"name": "暖色", "body": "陶罐", "categoryId": cat_id}}),
+        )
+        .unwrap();
+        assert_eq!(created["categoryId"], cat_id);
+        let listed = dispatch(&state, "list_prompt_categories", json!({})).unwrap();
+        assert_eq!(listed.as_array().unwrap()[0]["itemCount"], 1);
+        dispatch(
+            &state,
+            "delete_prompt_category",
+            json!({"categoryId": cat_id}),
+        )
+        .unwrap();
+        let presets = dispatch(&state, "list_prompt_presets", json!({})).unwrap();
+        assert!(presets[0]["categoryId"].is_null());
+    }
+
+    #[test]
     fn dispatch_list_picker_dir() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::for_test(dir.path().to_path_buf());
@@ -1125,5 +1469,63 @@ mod tests {
         )
         .unwrap();
         assert!(list.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dispatch_mine_prompt_from_image_mock() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(dir.path().to_path_buf());
+        state.ensure_dirs().unwrap();
+        let mut img = image::RgbImage::new(8, 8);
+        for p in img.pixels_mut() {
+            *p = image::Rgb([180, 60, 40]);
+        }
+        let png = dir.path().join("ref.png");
+        img.save(&png).unwrap();
+        let mined = dispatch(
+            &state,
+            "mine_prompt_from_image",
+            json!({"path": png.display().to_string()}),
+        )
+        .unwrap();
+        assert_eq!(mined["provider"], "mock");
+        assert!(!mined["name"].as_str().unwrap().is_empty());
+        assert!(mined["body"].as_str().unwrap().contains("mock"));
+    }
+
+    #[test]
+    fn dispatch_ai_settings_save_and_mask() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(dir.path().to_path_buf());
+        let got = dispatch(&state, "get_ai_settings", json!({})).unwrap();
+        assert_eq!(got["image"]["provider"], "mock");
+        assert_eq!(got["image"]["apiKeySet"], false);
+
+        let saved = dispatch(
+            &state,
+            "set_ai_settings",
+            json!({
+                "image": {
+                    "provider": "minimax",
+                    "baseUrl": "https://api.minimaxi.com",
+                    "apiKey": "sk-live",
+                    "model": "image-01"
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(saved["image"]["provider"], "minimax");
+        assert_eq!(saved["image"]["apiKeySet"], true);
+        assert_eq!(saved["image"]["effective"], "minimax");
+        assert!(saved["image"].get("apiKey").is_none());
+
+        let keep = dispatch(
+            &state,
+            "set_ai_settings",
+            json!({"image": {"provider": "minimax", "apiKey": ""}}),
+        )
+        .unwrap();
+        assert_eq!(keep["image"]["apiKeySet"], true);
+        assert_eq!(state.ai_image().api_key, "sk-live");
     }
 }

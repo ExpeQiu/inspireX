@@ -1,7 +1,9 @@
 /** 浏览器主界面子页面路径（localhost:1420/…）。 */
 
-export type Mode = "browse" | "library" | "subscribe" | "generate";
+export type Mode = "browse" | "library" | "subscribe" | "created" | "generate" | "settings";
 export type BrowseKind = "volumes" | "local" | "hub";
+export type AppModule = "library" | "generate" | "settings";
+export type GenerateView = "prompt" | "generate" | "created";
 
 export type RouteState = {
   mode: Mode;
@@ -10,6 +12,8 @@ export type RouteState = {
   browsePath: string | null;
   tagFilter: string | null;
   colorFilter: string | null;
+  generateView?: GenerateView;
+  promptCategoryId?: string | null;
 };
 
 const VIRTUAL_PREFIX = "inspirex://";
@@ -20,15 +24,37 @@ export const PATHS = {
   local: "/local",
   hub: "/hub",
   subscribe: "/subscribe",
+  created: "/created",
   generate: "/generate",
+  generatePrompt: "/generate/prompt",
+  generateCreated: "/generate/created",
+  settings: "/settings",
 } as const;
+
+/** browse / library / subscribe / created / 文件夹都属素材管理；generate 是 AI 生图；settings 独立。 */
+export function appModule(mode: Mode): AppModule {
+  if (mode === "generate") return "generate";
+  if (mode === "settings") return "settings";
+  return "library";
+}
 
 export function isVirtualBrowsePath(path: string | null | undefined): boolean {
   return !path || path.startsWith(VIRTUAL_PREFIX);
 }
 
+export function parseAppHref(href: string): RouteState {
+  const q = href.indexOf("?");
+  const pathname = (q < 0 ? href : href.slice(0, q)) || "/";
+  const search = q < 0 ? "" : href.slice(q);
+  return parseAppUrl(pathname, search);
+}
+
 export function folderPath(id: string): string {
   return `/folders/${encodeURIComponent(id)}`;
+}
+
+export function promptCategoryPath(id: string): string {
+  return `${PATHS.generatePrompt}/${encodeURIComponent(id)}`;
 }
 
 function virtualRootOf(kind: BrowseKind): string | null {
@@ -49,12 +75,23 @@ function queryOf(state: RouteState): string {
 }
 
 export function toHref(state: RouteState): string {
+  if (state.mode === "settings") return PATHS.settings;
   if (state.viewFolderId) {
     return `${folderPath(state.viewFolderId)}${queryOf({ ...state, mode: "library" })}`;
   }
   if (state.mode === "library") return `${PATHS.library}${queryOf(state)}`;
   if (state.mode === "subscribe") return `${PATHS.subscribe}${queryOf(state)}`;
-  if (state.mode === "generate") return `${PATHS.generate}${queryOf(state)}`;
+  if (state.mode === "created") return `${PATHS.created}${queryOf(state)}`;
+  if (state.mode === "generate") {
+    if (state.generateView === "prompt") {
+      if (state.promptCategoryId) {
+        return `${promptCategoryPath(state.promptCategoryId)}${queryOf(state)}`;
+      }
+      return `${PATHS.generatePrompt}${queryOf(state)}`;
+    }
+    if (state.generateView === "created") return `${PATHS.generateCreated}${queryOf(state)}`;
+    return `${PATHS.generate}${queryOf(state)}`;
+  }
   if (state.browseKind === "local") return `${PATHS.local}${queryOf(state)}`;
   if (state.browseKind === "hub") return `${PATHS.hub}${queryOf(state)}`;
   return `${PATHS.volumes}${queryOf(state)}`;
@@ -74,6 +111,8 @@ export function parseAppUrl(pathname: string, search: string): RouteState {
     browsePath,
     tagFilter,
     colorFilter,
+    generateView: "generate",
+    promptCategoryId: null,
   };
 
   const folderMatch = segs.match(/^\/folders\/([^/]+)$/);
@@ -92,8 +131,30 @@ export function parseAppUrl(pathname: string, search: string): RouteState {
   if (segs === PATHS.subscribe) {
     return { ...base, mode: "subscribe", browsePath: null };
   }
+  if (segs === PATHS.created) {
+    return { ...base, mode: "created", browsePath: null };
+  }
+  const promptCatMatch = segs.match(/^\/generate\/prompt\/([^/]+)$/);
+  if (promptCatMatch) {
+    return {
+      ...base,
+      mode: "generate",
+      generateView: "prompt",
+      promptCategoryId: decodeURIComponent(promptCatMatch[1]),
+      browsePath: null,
+    };
+  }
+  if (segs === PATHS.generatePrompt) {
+    return { ...base, mode: "generate", generateView: "prompt", browsePath: null };
+  }
+  if (segs === PATHS.generateCreated) {
+    return { ...base, mode: "generate", generateView: "created", browsePath: null };
+  }
   if (segs === PATHS.generate) {
-    return { ...base, mode: "generate", browsePath: null };
+    return { ...base, mode: "generate", generateView: "generate", browsePath: null };
+  }
+  if (segs === PATHS.settings) {
+    return { ...base, mode: "settings", browsePath: null };
   }
   if (segs === PATHS.local) {
     return { ...base, mode: "browse", browseKind: "local" };
@@ -112,7 +173,9 @@ export function sameRoute(a: RouteState, b: RouteState): boolean {
     a.viewFolderId === b.viewFolderId &&
     (a.browsePath || "") === (b.browsePath || "") &&
     (a.tagFilter || "") === (b.tagFilter || "") &&
-    (a.colorFilter || "") === (b.colorFilter || "")
+    (a.colorFilter || "") === (b.colorFilter || "") &&
+    (a.mode !== "generate" || (a.generateView || "generate") === (b.generateView || "generate")) &&
+    (a.promptCategoryId || "") === (b.promptCategoryId || "")
   );
 }
 

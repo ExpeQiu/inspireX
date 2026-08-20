@@ -12,6 +12,8 @@ type ExternalListing = {
   path: string;
   parent?: string | null;
   folders: ExternalItem[];
+  media?: ExternalItem[];
+  truncated?: boolean;
 };
 
 export type FolderPickerKind = "local" | "volumes";
@@ -20,6 +22,7 @@ type Props = {
   kind: FolderPickerKind;
   title: string;
   confirmLabel: string;
+  pickFiles?: boolean;
   onPick: (path: string) => void;
   onCancel: () => void;
 };
@@ -52,11 +55,24 @@ function folderLabel(path: string, fallback: string): string {
   return parts[parts.length - 1] || fallback;
 }
 
-export function FolderPicker({ kind, title, confirmLabel, onPick, onCancel }: Props) {
+export function FolderPicker({
+  kind,
+  title,
+  confirmLabel,
+  pickFiles = false,
+  onPick,
+  onCancel,
+}: Props) {
+  const [activeKind, setActiveKind] = useState<FolderPickerKind>(kind);
   const [navPath, setNavPath] = useState<string | null>(null);
   const [listing, setListing] = useState<ExternalListing | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
+
+  useEffect(() => {
+    setActiveKind(kind);
+    setNavPath(null);
+  }, [kind]);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,15 +82,17 @@ export function FolderPicker({ kind, title, confirmLabel, onPick, onCancel }: Pr
       try {
         const next = await invoke<ExternalListing>("list_picker_dir", {
           path: navPath,
-          kind,
+          kind: activeKind,
+          includeMedia: pickFiles,
         });
         if (cancelled) return;
         setListing(next);
         console.info("[inspirex]", {
-          event: "folder_picker_list",
-          kind,
+          event: pickFiles ? "file_picker_list" : "folder_picker_list",
+          kind: activeKind,
           path: next.path,
           folders: next.folders.length,
+          media: next.media?.length ?? 0,
         });
       } catch (e) {
         if (cancelled) return;
@@ -86,7 +104,7 @@ export function FolderPicker({ kind, title, confirmLabel, onPick, onCancel }: Pr
     return () => {
       cancelled = true;
     };
-  }, [kind, navPath]);
+  }, [activeKind, navPath, pickFiles]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -97,16 +115,27 @@ export function FolderPicker({ kind, title, confirmLabel, onPick, onCancel }: Pr
   }, [onCancel]);
 
   const shortcuts = useMemo(
-    () => (listing ? shortcutsFor(kind, listing.root) : []),
-    [kind, listing],
+    () => (listing ? shortcutsFor(activeKind, listing.root) : []),
+    [activeKind, listing],
+  );
+
+  const images = useMemo(
+    () => (listing?.media ?? []).filter((m) => m.kind === "image"),
+    [listing],
   );
 
   const atVolumesRoot =
-    kind === "volumes" &&
+    activeKind === "volumes" &&
     !!listing &&
     (listing.path === listing.root || listing.path === "/Volumes");
-  const canConfirm = Boolean(listing?.path) && !atVolumesRoot && !busy;
+  const canConfirm = !pickFiles && Boolean(listing?.path) && !atVolumesRoot && !busy;
   const currentName = listing ? folderLabel(listing.path, "此文件夹") : "";
+
+  const switchKind = (next: FolderPickerKind) => {
+    setListing(null);
+    setNavPath(null);
+    setActiveKind(next);
+  };
 
   return (
     <div className="folder-picker-backdrop" onClick={onCancel} role="presentation">
@@ -121,19 +150,37 @@ export function FolderPicker({ kind, title, confirmLabel, onPick, onCancel }: Pr
           <h2 id="folder-picker-title">{title}</h2>
           <p className="folder-picker-path">{listing?.path || "正在打开…"}</p>
         </header>
-        {shortcuts.length > 0 ? (
-          <div className="folder-picker-shortcuts">
-            {shortcuts.map((s) => (
+        {(pickFiles || shortcuts.length > 0) ? (
+        <div className="folder-picker-shortcuts">
+          {pickFiles ? (
+            <>
               <button
-                key={s.path}
                 type="button"
-                className={listing?.path === s.path ? "active" : ""}
-                onClick={() => setNavPath(s.path)}
+                className={activeKind === "local" ? "active" : ""}
+                onClick={() => switchKind("local")}
               >
-                {s.name}
+                本机
               </button>
-            ))}
-          </div>
+              <button
+                type="button"
+                className={activeKind === "volumes" ? "active" : ""}
+                onClick={() => switchKind("volumes")}
+              >
+                外置卷
+              </button>
+            </>
+          ) : null}
+          {shortcuts.map((s) => (
+            <button
+              key={s.path}
+              type="button"
+              className={listing?.path === s.path ? "active" : ""}
+              onClick={() => setNavPath(s.path)}
+            >
+              {s.name}
+            </button>
+          ))}
+        </div>
         ) : null}
         <div className="folder-picker-list">
           {listing?.parent ? (
@@ -146,13 +193,17 @@ export function FolderPicker({ kind, title, confirmLabel, onPick, onCancel }: Pr
               <span>上一级</span>
             </button>
           ) : null}
-          {busy && !listing ? <p className="folder-picker-hint">正在列出文件夹…</p> : null}
+          {busy && !listing ? (
+            <p className="folder-picker-hint">{pickFiles ? "正在列出文件…" : "正在列出文件夹…"}</p>
+          ) : null}
           {error ? <p className="folder-picker-error">{error}</p> : null}
-          {!busy && listing && listing.folders.length === 0 && !error ? (
+          {!busy && listing && listing.folders.length === 0 && images.length === 0 && !error ? (
             <p className="folder-picker-hint">
               {isPhotosLibrary(listing.path)
                 ? "这是照片图库，点下方按钮即可绑定。"
-                : "此目录下没有子文件夹，可直接选择当前目录。"}
+                : pickFiles
+                  ? "此目录下没有图片，可进入子文件夹。"
+                  : "此目录下没有子文件夹，可直接选择当前目录。"}
             </p>
           ) : null}
           {listing?.folders.map((f) => (
@@ -166,28 +217,55 @@ export function FolderPicker({ kind, title, confirmLabel, onPick, onCancel }: Pr
               <span className="folder-picker-name">{f.name}</span>
             </button>
           ))}
+          {pickFiles
+            ? images.map((f) => (
+                <button
+                  key={f.path}
+                  type="button"
+                  className="folder-picker-item folder-picker-file"
+                  onClick={() => {
+                    console.info("[inspirex]", {
+                      event: "file_picker_confirm",
+                      kind: activeKind,
+                      path: f.path,
+                    });
+                    onPick(f.path);
+                  }}
+                >
+                  <span className="folder-picker-icon">🖼</span>
+                  <span className="folder-picker-name">{f.name}</span>
+                </button>
+              ))
+            : null}
+          {pickFiles && listing?.truncated ? (
+            <p className="folder-picker-hint">图片较多，只显示了前一部分。请再进一层目录。</p>
+          ) : null}
         </div>
         <footer className="folder-picker-foot">
           <button type="button" onClick={onCancel}>
             取消
           </button>
-          <button
-            type="button"
-            className="primary"
-            disabled={!canConfirm}
-            onClick={() => {
-              if (!listing?.path || !canConfirm) return;
-              console.info("[inspirex]", {
-                event: "folder_picker_confirm",
-                kind,
-                path: listing.path,
-              });
-              onPick(listing.path);
-            }}
-          >
-            {confirmLabel}
-            {currentName ? `「${currentName}」` : ""}
-          </button>
+          {pickFiles ? (
+            <p className="folder-picker-hint">点图片即可选用</p>
+          ) : (
+            <button
+              type="button"
+              className="primary"
+              disabled={!canConfirm}
+              onClick={() => {
+                if (!listing?.path || !canConfirm) return;
+                console.info("[inspirex]", {
+                  event: "folder_picker_confirm",
+                  kind: activeKind,
+                  path: listing.path,
+                });
+                onPick(listing.path);
+              }}
+            >
+              {confirmLabel}
+              {currentName ? `「${currentName}」` : ""}
+            </button>
+          )}
         </footer>
       </div>
     </div>

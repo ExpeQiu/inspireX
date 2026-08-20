@@ -1,4 +1,4 @@
-use crate::models::{Asset, Folder, GenJob, Source, Tag};
+use crate::models::{Asset, Folder, GenJob, PromptCategory, PromptPreset, Source, Tag};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use thiserror::Error;
@@ -128,11 +128,29 @@ fn migrate(conn: &Connection) -> DbResult<()> {
             added_at TEXT NOT NULL,
             PRIMARY KEY (folder_id, kind, item_ref)
         );
+
+        CREATE TABLE IF NOT EXISTS prompt_categories (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_presets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            body TEXT NOT NULL,
+            image_path TEXT,
+            category_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         "#,
     )?;
     add_column_if_missing(conn, "assets", "source_kind", "TEXT NOT NULL DEFAULT 'local'")?;
     add_column_if_missing(conn, "assets", "source_ref", "TEXT")?;
     add_column_if_missing(conn, "gen_jobs", "output_paths", "TEXT NOT NULL DEFAULT '[]'")?;
+    add_column_if_missing(conn, "prompt_presets", "image_path", "TEXT")?;
+    add_column_if_missing(conn, "prompt_presets", "category_id", "TEXT")?;
     Ok(())
 }
 
@@ -991,6 +1009,124 @@ pub fn get_gen_job(conn: &Connection, id: &str) -> DbResult<Option<GenJob>> {
     .map_err(Into::into)
 }
 
+const PROMPT_PRESET_SELECT: &str = r#"
+    SELECT id, name, body, image_path, category_id, created_at, updated_at
+    FROM prompt_presets
+"#;
+
+fn map_prompt_preset(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptPreset> {
+    Ok(PromptPreset {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        body: row.get(2)?,
+        image_path: row.get(3)?,
+        category_id: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+pub fn insert_prompt_preset(conn: &Connection, preset: &PromptPreset) -> DbResult<()> {
+    conn.execute(
+        r#"INSERT INTO prompt_presets (id, name, body, image_path, category_id, created_at, updated_at)
+           VALUES (?1,?2,?3,?4,?5,?6,?7)"#,
+        params![
+            preset.id,
+            preset.name,
+            preset.body,
+            preset.image_path,
+            preset.category_id,
+            preset.created_at,
+            preset.updated_at
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_prompt_presets(conn: &Connection) -> DbResult<Vec<PromptPreset>> {
+    let mut stmt = conn.prepare(&format!("{PROMPT_PRESET_SELECT} ORDER BY updated_at DESC"))?;
+    let rows = stmt.query_map([], map_prompt_preset)?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+pub fn get_prompt_preset(conn: &Connection, id: &str) -> DbResult<Option<PromptPreset>> {
+    conn.query_row(
+        &format!("{PROMPT_PRESET_SELECT} WHERE id = ?1"),
+        params![id],
+        map_prompt_preset,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn update_prompt_preset(conn: &Connection, preset: &PromptPreset) -> DbResult<bool> {
+    let n = conn.execute(
+        "UPDATE prompt_presets SET name = ?2, body = ?3, image_path = ?4, category_id = ?5, updated_at = ?6 WHERE id = ?1",
+        params![
+            preset.id,
+            preset.name,
+            preset.body,
+            preset.image_path,
+            preset.category_id,
+            preset.updated_at
+        ],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn delete_prompt_preset(conn: &Connection, id: &str) -> DbResult<bool> {
+    let n = conn.execute("DELETE FROM prompt_presets WHERE id = ?1", params![id])?;
+    Ok(n > 0)
+}
+
+const PROMPT_CATEGORY_SELECT: &str = r#"
+    SELECT id, name, created_at,
+           (SELECT COUNT(*) FROM prompt_presets p WHERE p.category_id = prompt_categories.id)
+    FROM prompt_categories
+"#;
+
+fn map_prompt_category(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptCategory> {
+    Ok(PromptCategory {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        created_at: row.get(2)?,
+        item_count: row.get(3)?,
+    })
+}
+
+pub fn insert_prompt_category(conn: &Connection, cat: &PromptCategory) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO prompt_categories (id, name, created_at) VALUES (?1,?2,?3)",
+        params![cat.id, cat.name, cat.created_at],
+    )?;
+    Ok(())
+}
+
+pub fn list_prompt_categories(conn: &Connection) -> DbResult<Vec<PromptCategory>> {
+    let mut stmt = conn.prepare(&format!("{PROMPT_CATEGORY_SELECT} ORDER BY created_at ASC"))?;
+    let rows = stmt.query_map([], map_prompt_category)?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+pub fn get_prompt_category(conn: &Connection, id: &str) -> DbResult<Option<PromptCategory>> {
+    conn.query_row(
+        &format!("{PROMPT_CATEGORY_SELECT} WHERE id = ?1"),
+        params![id],
+        map_prompt_category,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn delete_prompt_category(conn: &Connection, id: &str) -> DbResult<bool> {
+    conn.execute(
+        "UPDATE prompt_presets SET category_id = NULL WHERE category_id = ?1",
+        params![id],
+    )?;
+    let n = conn.execute("DELETE FROM prompt_categories WHERE id = ?1", params![id])?;
+    Ok(n > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,6 +1140,74 @@ mod tests {
         assert_eq!(asset_count(&conn).unwrap(), 0);
         assert!(list_sources(&conn).unwrap().is_empty());
         assert!(list_gen_jobs(&conn, 10).unwrap().is_empty());
+        assert!(list_prompt_presets(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn prompt_preset_crud() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        let conn = open_db(&db).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let preset = PromptPreset {
+            id: "p1".into(),
+            name: "暖色静物".into(),
+            body: "暖色陶罐静物，侧光，胶片质感".into(),
+            image_path: Some("/tmp/ref.jpg".into()),
+            category_id: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        insert_prompt_preset(&conn, &preset).unwrap();
+        let listed = list_prompt_presets(&conn).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "暖色静物");
+        assert_eq!(listed[0].image_path.as_deref(), Some("/tmp/ref.jpg"));
+        let updated = PromptPreset {
+            body: "暖色陶罐静物，侧光".into(),
+            image_path: Some("/tmp/ref2.jpg".into()),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            ..preset.clone()
+        };
+        update_prompt_preset(&conn, &updated).unwrap();
+        let got = get_prompt_preset(&conn, "p1").unwrap().unwrap();
+        assert_eq!(got.body, "暖色陶罐静物，侧光");
+        assert_eq!(got.image_path.as_deref(), Some("/tmp/ref2.jpg"));
+        assert!(delete_prompt_preset(&conn, "p1").unwrap());
+        assert!(list_prompt_presets(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn prompt_category_crud_and_bind() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        let conn = open_db(&db).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let cat = PromptCategory {
+            id: "c1".into(),
+            name: "静物".into(),
+            created_at: now.clone(),
+            item_count: 0,
+        };
+        insert_prompt_category(&conn, &cat).unwrap();
+        let preset = PromptPreset {
+            id: "p1".into(),
+            name: "暖色".into(),
+            body: "暖色陶罐".into(),
+            image_path: None,
+            category_id: Some("c1".into()),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        insert_prompt_preset(&conn, &preset).unwrap();
+        let listed = list_prompt_categories(&conn).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "静物");
+        assert_eq!(listed[0].item_count, 1);
+        assert!(delete_prompt_category(&conn, "c1").unwrap());
+        let unbound = get_prompt_preset(&conn, "p1").unwrap().unwrap();
+        assert!(unbound.category_id.is_none());
+        assert!(list_prompt_categories(&conn).unwrap().is_empty());
     }
 
     #[test]

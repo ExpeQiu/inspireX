@@ -46,12 +46,34 @@ input {
   min-height: 100vh;
 }
 
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .sidebar,
 .detail {
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   border-right: 1px solid var(--line);
   padding: 20px 14px;
+}
+
+.detail {
   overflow: auto;
+}
+
+.sidebar-nav {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.sidebar-settings {
+  flex: 0 0 auto;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 
 .detail {
@@ -237,7 +259,8 @@ input {
 }
 
 .nav-row:hover .nav-tag-apply,
-.nav-row.active .nav-tag-apply {
+.nav-row.active .nav-tag-apply,
+.nav-add-always {
   opacity: 1;
 }
 
@@ -336,6 +359,27 @@ button.finder-tag-chip {
   position: sticky;
   top: 0;
   z-index: 2;
+}
+
+.module-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 12px;
+}
+
+.module-tab {
+  display: inline-block;
+  padding: 8px 14px;
+  border-radius: 8px;
+  color: var(--ink);
+  text-decoration: none;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+
+.module-tab:hover,
+.module-tab.active {
+  background: var(--surface-2);
 }
 
 .search-row {
@@ -535,10 +579,19 @@ button.primary {
 
 .folder-picker-foot {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: center;
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--line);
+}
+
+.folder-picker-foot .folder-picker-hint {
+  margin: 0;
+}
+
+.folder-picker-file .folder-picker-name {
+  color: var(--ink);
 }
 
 .grid {
@@ -704,6 +757,11 @@ button.primary {
   font-size: 11px;
   font-weight: 400;
   margin-left: 6px;
+}
+
+.nav-sub .nav-item {
+  padding-left: 22px;
+  font-size: 14px;
 }
 
 .card-remove {
@@ -1108,6 +1166,185 @@ dd {
   margin-top: 4px;
 }
 
+.prompt-form-footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, max-content);
+  gap: 16px;
+  align-items: center;
+}
+
+.prompt-form-footer .form-actions {
+  margin-top: 0;
+}
+
+.prompt-card {
+  cursor: default;
+  align-items: center;
+}
+
+.prompt-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.prompt-card-thumb {
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #111;
+}
+
+.prompt-card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.prompt-tile {
+  cursor: default;
+}
+
+.prompt-tile-image {
+  aspect-ratio: 1;
+  background: #161412;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.prompt-tile-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.prompt-tile-ph {
+  color: var(--muted);
+  font-size: 28px;
+  letter-spacing: 0.04em;
+}
+
+.prompt-tile-caption {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px 10px 10px;
+}
+
+.prompt-tile-text {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.prompt-tile-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: none;
+  gap: 4px;
+  z-index: 2;
+}
+
+.prompt-tile:hover .prompt-tile-actions,
+.prompt-tile:focus-within .prompt-tile-actions {
+  display: flex;
+}
+
+.prompt-tile-actions button {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.prompt-form-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.prompt-form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.prompt-image-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.prompt-image-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.prompt-image-frame {
+  flex: 1;
+  min-height: 180px;
+  max-height: 220px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background-color: #dcd6ce;
+  background-image:
+    linear-gradient(45deg, #cfc8be 25%, transparent 25%),
+    linear-gradient(-45deg, #cfc8be 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #cfc8be 75%),
+    linear-gradient(-45deg, transparent 75%, #cfc8be 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.prompt-image-frame img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
+}
+
+.prompt-image-empty {
+  border-style: dashed;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 12px;
+  background-image: none;
+  background-color: transparent;
+}
+
+.prompt-preview {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 6px;
+}
+
 .form-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -1150,6 +1387,10 @@ dd {
     grid-template-columns: 1fr;
     overflow: auto;
   }
+  .prompt-form-layout,
+  .prompt-form-footer {
+    grid-template-columns: 1fr;
+  }
   .detail {
     position: fixed;
     right: 0;
@@ -1159,4 +1400,30 @@ dd {
     background: var(--surface);
     z-index: 5;
   }
+}
+
+.settings-grid {
+  display: grid;
+  gap: 16px;
+  max-width: 720px;
+}
+
+.settings-card h3 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  letter-spacing: 0.04em;
+}
+
+.settings-effective {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.settings-status {
+  align-self: center;
+  font-size: 13px;
+  color: var(--muted);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
 }

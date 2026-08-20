@@ -8,15 +8,36 @@ const PATHS = {
   local: "/local",
   hub: "/hub",
   subscribe: "/subscribe",
+  created: "/created",
   generate: "/generate",
+  generatePrompt: "/generate/prompt",
+  generateCreated: "/generate/created",
+  settings: "/settings",
 };
+
+function appModule(mode) {
+  if (mode === "generate") return "generate";
+  if (mode === "settings") return "settings";
+  return "library";
+}
 
 function isVirtualBrowsePath(path) {
   return !path || path.startsWith(VIRTUAL_PREFIX);
 }
 
+function parseAppHref(href) {
+  const q = href.indexOf("?");
+  const pathname = (q < 0 ? href : href.slice(0, q)) || "/";
+  const search = q < 0 ? "" : href.slice(q);
+  return parseAppUrl(pathname, search);
+}
+
 function folderPath(id) {
   return `/folders/${encodeURIComponent(id)}`;
+}
+
+function promptCategoryPath(id) {
+  return `${PATHS.generatePrompt}/${encodeURIComponent(id)}`;
 }
 
 function queryOf(state) {
@@ -31,12 +52,23 @@ function queryOf(state) {
 }
 
 function toHref(state) {
+  if (state.mode === "settings") return PATHS.settings;
   if (state.viewFolderId) {
     return `${folderPath(state.viewFolderId)}${queryOf({ ...state, mode: "library" })}`;
   }
   if (state.mode === "library") return `${PATHS.library}${queryOf(state)}`;
   if (state.mode === "subscribe") return `${PATHS.subscribe}${queryOf(state)}`;
-  if (state.mode === "generate") return `${PATHS.generate}${queryOf(state)}`;
+  if (state.mode === "created") return `${PATHS.created}${queryOf(state)}`;
+  if (state.mode === "generate") {
+    if (state.generateView === "prompt") {
+      if (state.promptCategoryId) {
+        return `${promptCategoryPath(state.promptCategoryId)}${queryOf(state)}`;
+      }
+      return `${PATHS.generatePrompt}${queryOf(state)}`;
+    }
+    if (state.generateView === "created") return `${PATHS.generateCreated}${queryOf(state)}`;
+    return `${PATHS.generate}${queryOf(state)}`;
+  }
   if (state.browseKind === "local") return `${PATHS.local}${queryOf(state)}`;
   if (state.browseKind === "hub") return `${PATHS.hub}${queryOf(state)}`;
   return `${PATHS.volumes}${queryOf(state)}`;
@@ -55,6 +87,8 @@ function parseAppUrl(pathname, search) {
     browsePath,
     tagFilter,
     colorFilter,
+    generateView: "generate",
+    promptCategoryId: null,
   };
   const folderMatch = segs.match(/^\/folders\/([^/]+)$/);
   if (folderMatch) {
@@ -67,7 +101,25 @@ function parseAppUrl(pathname, search) {
   }
   if (segs === PATHS.library) return { ...base, mode: "library", browsePath: null };
   if (segs === PATHS.subscribe) return { ...base, mode: "subscribe", browsePath: null };
-  if (segs === PATHS.generate) return { ...base, mode: "generate", browsePath: null };
+  if (segs === PATHS.created) return { ...base, mode: "created", browsePath: null };
+  const promptCatMatch = segs.match(/^\/generate\/prompt\/([^/]+)$/);
+  if (promptCatMatch) {
+    return {
+      ...base,
+      mode: "generate",
+      generateView: "prompt",
+      promptCategoryId: decodeURIComponent(promptCatMatch[1]),
+      browsePath: null,
+    };
+  }
+  if (segs === PATHS.generatePrompt) {
+    return { ...base, mode: "generate", generateView: "prompt", browsePath: null };
+  }
+  if (segs === PATHS.generateCreated) {
+    return { ...base, mode: "generate", generateView: "created", browsePath: null };
+  }
+  if (segs === PATHS.generate) return { ...base, mode: "generate", generateView: "generate", browsePath: null };
+  if (segs === PATHS.settings) return { ...base, mode: "settings", browsePath: null };
   if (segs === PATHS.local) return { ...base, mode: "browse", browseKind: "local" };
   if (segs === PATHS.hub) return { ...base, mode: "browse", browseKind: "hub" };
   return { ...base, mode: "browse", browseKind: "volumes" };
@@ -80,7 +132,9 @@ function sameRoute(a, b) {
     a.viewFolderId === b.viewFolderId &&
     (a.browsePath || "") === (b.browsePath || "") &&
     (a.tagFilter || "") === (b.tagFilter || "") &&
-    (a.colorFilter || "") === (b.colorFilter || "")
+    (a.colorFilter || "") === (b.colorFilter || "") &&
+    (a.mode !== "generate" || (a.generateView || "generate") === (b.generateView || "generate")) &&
+    (a.promptCategoryId || "") === (b.promptCategoryId || "")
   );
 }
 
@@ -96,6 +150,8 @@ const empty = {
   browsePath: null,
   tagFilter: null,
   colorFilter: null,
+  generateView: "generate",
+  promptCategoryId: null,
 };
 
 const cases = [
@@ -104,7 +160,15 @@ const cases = [
   [{ ...empty, mode: "browse", browseKind: "local" }, "/local"],
   [{ ...empty, mode: "browse", browseKind: "hub" }, "/hub"],
   [{ ...empty, mode: "subscribe" }, "/subscribe"],
-  [{ ...empty, mode: "generate" }, "/generate"],
+  [{ ...empty, mode: "created" }, "/created"],
+  [{ ...empty, mode: "generate", generateView: "generate" }, "/generate"],
+  [{ ...empty, mode: "generate", generateView: "prompt" }, "/generate/prompt"],
+  [
+    { ...empty, mode: "generate", generateView: "prompt", promptCategoryId: "cat1" },
+    "/generate/prompt/cat1",
+  ],
+  [{ ...empty, mode: "generate", generateView: "created" }, "/generate/created"],
+  [{ ...empty, mode: "settings" }, "/settings"],
   [{ ...empty, mode: "library", viewFolderId: "abc" }, "/folders/abc"],
   [
     { ...empty, mode: "browse", browseKind: "local", browsePath: "/Users/me/Pictures" },
@@ -130,6 +194,15 @@ if (!sameRoute(parseAppUrl("/", ""), parseAppUrl("/volumes", ""))) {
 }
 if (toHref({ ...empty, browsePath: "inspirex://volumes" }) !== "/volumes") {
   fail("虚拟根路径不应写入 ?path=");
+}
+
+if (appModule("generate") !== "generate") fail("generate 应属 AI 生图模块");
+if (appModule("settings") !== "settings") fail("settings 应属设置");
+for (const m of ["browse", "library", "subscribe", "created"]) {
+  if (appModule(m) !== "library") fail(`${m} 应属素材管理`);
+}
+if (parseAppHref("/library?tag=%E7%BA%A2").tagFilter !== "红") {
+  fail("parseAppHref 应解析 query");
 }
 
 console.log("OK: app subpage routes");

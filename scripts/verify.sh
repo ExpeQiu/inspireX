@@ -101,7 +101,9 @@ if curl -sf --max-time 2 "http://127.0.0.1:${INSPIREX_INGEST_PORT:-18765}/health
     -H "Content-Type: application/json" \
     -d '{"cmd":"get_library_info","args":{}}' >/dev/null \
     || fail "ingest 已启动但 /v1/invoke 失败"
-  ok "ingest browse + invoke"
+  code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "http://127.0.0.1:${INSPIREX_INGEST_PORT:-18765}/v1/browse/thumb")"
+  [[ "$code" == "400" ]] || fail "GET /v1/browse/thumb 无 path 应 400，实际 $code"
+  ok "ingest browse + invoke + thumb contract"
 else
   echo "SKIP: ingest 未在监听（未 start.sh 时正常）"
 fi

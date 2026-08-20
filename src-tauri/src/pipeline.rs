@@ -116,12 +116,49 @@ pub fn write_thumbnail(src: &Path, dest: &Path, max_side: u32) -> Result<(), Str
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    if try_sips_thumb(src, dest, max_side).is_ok() {
+        return Ok(());
+    }
+    if crate::video::extract_scaled_frame(src, dest, Some(max_side)).is_ok() {
+        return Ok(());
+    }
     let img = image::open(src).map_err(|e| e.to_string())?;
     let thumb = img.thumbnail(max_side, max_side);
     thumb
         .save_with_format(dest, image::ImageFormat::Jpeg)
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn try_sips_thumb(src: &Path, dest: &Path, max_side: u32) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+        let status = Command::new("sips")
+            .args([
+                "-Z",
+                &max_side.to_string(),
+                "-s",
+                "format",
+                "jpeg",
+                &src.display().to_string(),
+                "--out",
+                &dest.display().to_string(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() && dest.exists() {
+            return Ok(());
+        }
+        Err("sips 缩略图失败".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (src, dest, max_side);
+        Err("no sips".into())
+    }
 }
 
 pub fn guess_mime(path: &Path) -> Option<&'static str> {
