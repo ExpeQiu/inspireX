@@ -1,7 +1,13 @@
+importScripts("pinterest.js");
+
+const PX = globalThis.__inspirexPinterest;
 const DEFAULTS = {
   port: 18765,
   token: "inspirex-local",
 };
+const MAX_WATCH_IMPORT = 20;
+const MAX_WATCH_COLLECT = 80;
+const SEEN_CAP = 4000;
 
 function ensureMenus() {
   chrome.contextMenus.removeAll(() => {
@@ -23,12 +29,18 @@ function ensureMenus() {
   });
 }
 
+function ensureSyncAlarm() {
+  chrome.alarms.create("inspirex-watch-sync", { delayInMinutes: 1, periodInMinutes: 2 });
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   ensureMenus();
+  ensureSyncAlarm();
   restoreWatches().catch((e) => console.warn("[inspirex] restore", e));
 });
 chrome.runtime.onStartup.addListener(() => {
   ensureMenus();
+  ensureSyncAlarm();
   restoreWatches().catch((e) => console.warn("[inspirex] restore", e));
 });
 
@@ -89,7 +101,11 @@ function bytesToBase64(buf) {
   return btoa(bin);
 }
 
-async function fetchImageInChrome(url, pageUrl) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchOneImage(url, pageUrl) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 12000);
   try {
@@ -112,6 +128,19 @@ async function fetchImageInChrome(url, pageUrl) {
   }
 }
 
+async function fetchImageInChrome(url, pageUrl) {
+  const candidates = PX.pinimgCandidates ? PX.pinimgCandidates(url) : [url];
+  let lastErr = new Error("无候选图片");
+  for (let i = 0; i < candidates.length; i++) {
+    try {
+      return await fetchOneImage(candidates[i], pageUrl);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
 async function saveToInspireX(payload) {
   const cfg = await getConfig();
   await assertIngestUp(cfg.port);
@@ -122,21 +151,23 @@ async function saveToInspireX(payload) {
     console.warn("[inspirex] chrome_fetch_fail", e);
     throw new Error("浏览器下载图片失败: " + (e && e.message ? e.message : e));
   }
+  const body = {
+    imageUrl: payload.imageUrl,
+    pageUrl: payload.pageUrl || null,
+    title: payload.title || null,
+    notes: payload.notes || null,
+    imageBase64: inline.base64,
+    mime: inline.mime,
+    sourceRef: payload.sourceRef || null,
+  };
+  if (payload.folderId) body.folderId = payload.folderId;
   const res = await fetch("http://127.0.0.1:" + cfg.port + "/v1/import", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: "Bearer " + cfg.token,
     },
-    body: JSON.stringify({
-      imageUrl: payload.imageUrl,
-      pageUrl: payload.pageUrl || null,
-      title: payload.title || null,
-      notes: payload.notes || null,
-      imageBase64: inline.base64,
-      mime: inline.mime,
-      sourceRef: payload.sourceRef || null,
-    }),
+    body: JSON.stringify(body),
   });
   const data = await res.json();
   if (!res.ok || !data.ok) {
@@ -250,6 +281,10 @@ function alarmName(id) {
   return "watch:" + id;
 }
 
+function seenKey(id) {
+  return "watchSeen:" + id;
+}
+
 function normalizePath(url) {
   try {
     const u = new URL(url);
@@ -293,7 +328,7 @@ function collectPageImageUrls() {
     try {
       const u = new URL(url, location.href);
       if (!/(^|\.)pinimg\.com$/i.test(u.hostname)) return url;
-      u.pathname = u.pathname.replace(/\/\d+x\//, "/736x/");
+      u.pathname = u.pathname.replace(/\/\d+x\//, "/originals/");
       return u.href;
     } catch {
       return url;
@@ -343,12 +378,20 @@ async function findWatch(tabUrl) {
   return list.find((s) => urlsMatch(s.url, tabUrl)) || null;
 }
 
+function watchIntervalMin(src) {
+  const n = Number(src && src.intervalMin);
+  if (Number.isFinite(n) && n >= 1) return Math.max(1, n);
+  if (src && PX.isPinterestUrl(src.url)) return 15;
+  return 60;
+}
+
 async function ensureAlarm(src) {
-  const minutes = Math.max(1, Number(src.intervalMin) || 60);
+  const minutes = watchIntervalMin(src);
   await chrome.alarms.create(alarmName(src.id), { periodInMinutes: minutes });
 }
 
 async function restoreWatches() {
+  ensureSyncAlarm();
   const list = await listWatchSources();
   const alarms = await chrome.alarms.getAll();
   for (const a of alarms) {
@@ -365,6 +408,8 @@ async function watchStatus(tabUrl) {
   return {
     watching: !!(src && src.enabled),
     source: src,
+    pinterest: PX.isPinterestUrl(tabUrl),
+    intervalMin: src ? watchIntervalMin(src) : PX.isPinterestUrl(tabUrl) ? 15 : 60,
   };
 }
 
@@ -388,7 +433,7 @@ async function toggleWatch(tab) {
         name: (tab.title || "盯梢").slice(0, 48),
         kind: "plugin_watch",
         url: tab.url.split("?")[0],
-        intervalMin: 60,
+        intervalMin: PX.isPinterestUrl(tab.url) ? 15 : 60,
       },
     });
   } else {
@@ -397,6 +442,140 @@ async function toggleWatch(tab) {
   await ensureAlarm(src);
   runWatch(src.id).catch((e) => console.warn("[inspirex] watch_now", e));
   return { watching: true, source: src };
+}
+
+function isWatchDue(src) {
+  const last = src.lastRunAt || src.last_run_at;
+  if (!last) return true;
+  const ts = Date.parse(last);
+  if (!Number.isFinite(ts)) return true;
+  const intervalMs = watchIntervalMin(src) * 60 * 1000;
+  return Date.now() - ts >= intervalMs;
+}
+
+async function syncAndRunDue() {
+  const list = await listWatchSources();
+  const enabled = list.filter((s) => s.enabled);
+  for (const s of enabled) await ensureAlarm(s);
+  const due = enabled.filter((s) => isWatchDue(s) && !watchBusy[s.id]);
+  if (!due.length) return;
+  due.sort((a, b) => {
+    const ta = Date.parse(a.lastRunAt || a.last_run_at || "") || 0;
+    const tb = Date.parse(b.lastRunAt || b.last_run_at || "") || 0;
+    return ta - tb;
+  });
+  await runWatch(due[0].id);
+}
+
+async function loadSeen(sourceId) {
+  const key = seenKey(sourceId);
+  const data = await chrome.storage.local.get(key);
+  const raw = data[key] || {};
+  return {
+    ids: Array.isArray(raw.ids) ? raw.ids.slice() : [],
+    urls: Array.isArray(raw.urls) ? raw.urls.slice() : [],
+  };
+}
+
+async function saveSeen(sourceId, seen) {
+  await chrome.storage.local.set({
+    [seenKey(sourceId)]: {
+      ids: (seen.ids || []).slice(-SEEN_CAP),
+      urls: (seen.urls || []).slice(-SEEN_CAP),
+    },
+  });
+}
+
+function markSeen(seen, pin) {
+  if (pin.pinId && seen.ids.indexOf(pin.pinId) < 0) seen.ids.push(pin.pinId);
+  if (pin.imageUrl && seen.urls.indexOf(pin.imageUrl) < 0) seen.urls.push(pin.imageUrl);
+}
+
+function alreadySeen(seen, pin) {
+  if (pin.pinId && seen.ids.indexOf(pin.pinId) >= 0) return true;
+  if (pin.imageUrl && seen.urls.indexOf(pin.imageUrl) >= 0) return true;
+  return false;
+}
+
+function waitTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (tab) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUp);
+      resolve(tab || null);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    function onUp(id, info, tab) {
+      if (id !== tabId) return;
+      if (info.status === "complete") finish(tab);
+    }
+    chrome.tabs.onUpdated.addListener(onUp);
+    chrome.tabs
+      .get(tabId)
+      .then((tab) => {
+        if (tab && tab.status === "complete") finish(tab);
+      })
+      .catch(() => {});
+  });
+}
+
+async function ensureWatchTab(src) {
+  const tabs = await chrome.tabs.query({ url: ["https://*/*", "http://*/*"] });
+  let tab = tabs.find((t) => t.url && urlsMatch(src.url, t.url));
+  if (tab) return { tab, opened: false };
+  if (!PX.isPinterestUrl(src.url)) return { tab: null, opened: false };
+  tab = await chrome.tabs.create({ url: src.url, active: false, pinned: true });
+  const loaded = await waitTabComplete(tab.id, 25000);
+  if (loaded && loaded.url) tab = loaded;
+  else {
+    try {
+      tab = await chrome.tabs.get(tab.id);
+    } catch (_) {}
+  }
+  await sleep(2500);
+  console.log("[inspirex] watch_tab_open source_id=" + src.id + " tab_id=" + tab.id);
+  return { tab, opened: true };
+}
+
+async function collectFromTab(tab) {
+  if (PX.isPinterestUrl(tab.url)) {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["pinterest.js"],
+    });
+    const canScroll = !tab.active;
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: async (shouldScroll, limit) => {
+        const api = globalThis.__inspirexPinterest;
+        if (!api) return { pins: [], scrolled: false };
+        if (shouldScroll) await api.scrollBoard(6, 750);
+        return { pins: api.collectPins(limit), scrolled: shouldScroll };
+      },
+      args: [canScroll, MAX_WATCH_COLLECT],
+    });
+    const result = (injected && injected[0] && injected[0].result) || { pins: [] };
+    return Array.isArray(result.pins) ? result.pins : [];
+  }
+  const injected = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: collectPageImageUrls,
+  });
+  const urls = (injected && injected[0] && injected[0].result) || [];
+  return urls.map((imageUrl) => ({
+    imageUrl,
+    pinId: "",
+    pinUrl: tab.url || "",
+  }));
+}
+
+function looksLoggedOut(tab) {
+  const url = (tab && tab.url) || "";
+  const title = (tab && tab.title) || "";
+  return /\/login/i.test(url) || /log\s*in|登录|sign in/i.test(title);
 }
 
 const watchBusy = {};
@@ -415,43 +594,78 @@ async function runWatch(sourceId) {
       await chrome.alarms.clear(alarmName(sourceId));
       return;
     }
-    const tabs = await chrome.tabs.query({ url: ["https://*/*", "http://*/*"] });
-    const tab = tabs.find((t) => t.url && urlsMatch(src.url, t.url));
+    console.log(
+      "[inspirex] watch_start source_id=" + src.id + " url=" + src.url + " kind=" + src.kind
+    );
+    const ensured = await ensureWatchTab(src);
+    const tab = ensured.tab;
     if (!tab || !tab.id) {
       await invokeDesktop("report_source_run", {
         sourceId,
-        summary: "标签未打开，已跳过（请保持该页在 Chrome 中打开）",
+        summary: "标签未打开，已跳过（Pinterest 会自动打开看板；其他站点请保持该页打开）",
       });
       return;
     }
-    const injected = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: collectPageImageUrls,
-    });
-    const urls = ((injected && injected[0] && injected[0].result) || []).slice(0, 30);
+    if (looksLoggedOut(tab)) {
+      await invokeDesktop("report_source_run", {
+        sourceId,
+        summary: "看板未登录。请在自动打开的标签里登录 Pinterest，并保持标签不要关。",
+      });
+      return;
+    }
+    const pins = await collectFromTab(tab);
+    const seen = await loadSeen(src.id);
+    const fresh = pins.filter((p) => p.imageUrl && !alreadySeen(seen, p)).slice(0, MAX_WATCH_IMPORT);
     let imported = 0;
     let skipped = 0;
     let failed = 0;
-    for (const imageUrl of urls) {
+    const folderId = src.folderId || src.folder_id || null;
+    for (const pin of fresh) {
       try {
         const r = await saveToInspireX({
-          imageUrl,
-          pageUrl: tab.url,
+          imageUrl: pin.imageUrl,
+          pageUrl: pin.pinUrl || tab.url,
           title: tab.title || src.name,
           sourceRef: src.id,
+          folderId,
         });
         imported += r.imported || 0;
         skipped += r.skipped || 0;
+        markSeen(seen, pin);
       } catch (e) {
         failed += 1;
         console.warn("[inspirex] watch_save", e);
       }
     }
-    await invokeDesktop("report_source_run", {
-      sourceId,
-      summary:
-        "入库 " + imported + " · 跳过 " + skipped + " · 失败 " + failed + "（本页 " + urls.length + " 张）",
-    });
+    await saveSeen(src.id, seen);
+    const openedHint = ensured.opened ? "已自动打开看板" : "复用已开标签";
+    const summary =
+      "自动盯梢 · 入库 " +
+      imported +
+      " · 跳过 " +
+      skipped +
+      " · 失败 " +
+      failed +
+      " · 发现 " +
+      pins.length +
+      " 张 · 本轮新图 " +
+      fresh.length +
+      "（" +
+      openedHint +
+      "）";
+    await invokeDesktop("report_source_run", { sourceId, summary });
+    console.log(
+      "[inspirex] watch_done source_id=" +
+        src.id +
+        " imported=" +
+        imported +
+        " skipped=" +
+        skipped +
+        " failed=" +
+        failed +
+        " collected=" +
+        pins.length
+    );
   } catch (e) {
     try {
       await invokeDesktop("report_source_run", {
@@ -459,12 +673,20 @@ async function runWatch(sourceId) {
         summary: String(e && e.message ? e.message : e),
       });
     } catch (_) {}
+    console.warn("[inspirex] watch_fail source_id=" + sourceId, e);
   } finally {
     watchBusy[sourceId] = false;
   }
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (!alarm.name || alarm.name.indexOf("watch:") !== 0) return;
+  if (!alarm.name) return;
+  if (alarm.name === "inspirex-watch-sync") {
+    syncAndRunDue().catch((e) => console.warn("[inspirex] sync", e));
+    return;
+  }
+  if (alarm.name.indexOf("watch:") !== 0) return;
   runWatch(alarm.name.slice("watch:".length)).catch((e) => console.warn("[inspirex] alarm", e));
 });
+
+ensureSyncAlarm();

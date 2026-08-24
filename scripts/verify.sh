@@ -14,6 +14,7 @@ ok() { echo "OK: $*"; }
 [[ -f ADR/005-hub-cloud-folder.md ]] || fail "缺少 ADR-005"
 [[ -f ADR/006-browser-primary-ui.md ]] || fail "缺少 ADR-006"
 [[ -f ADR/007-cli-standard.md ]] || fail "缺少 ADR-007"
+[[ -f ADR/008-vprompt-sync.md ]] || fail "缺少 ADR-008"
 [[ -f src-tauri/Cargo.toml ]] || fail "缺少 src-tauri"
 [[ -f cli/pyproject.toml ]] || fail "缺少 cli/pyproject.toml"
 [[ -f cli/SKILL.md ]] || fail "缺少 cli/SKILL.md"
@@ -74,9 +75,15 @@ PY
   cargo test --quiet html_page_pull_then_skip_duplicate -- --nocapture
   cargo test --quiet html_page_respects_robots_disallow -- --nocapture
   cargo test --quiet plugin_watch_create_and_rust_does_not_crawl -- --nocapture
+  cargo test --quiet pinterest_url_coerces_to_plugin_watch -- --nocapture
+  cargo test --quiet pinterest_host_is_login_wall -- --nocapture
   cargo test --quiet mock_single_and_batch -- --nocapture
 )
 ok "mock import / rss / imagegen"
+
+echo "[verify] Pinterest 收集器（插件）"
+node "$ROOT/extension/test-pinterest.mjs"
+ok "pinterest collect"
 
 # 前端可编译（不要求 GUI）
 npm run build

@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { convertFileSrc, hasTauriIpc, invoke, thumbSrc } from "./bridge";
-import { pickFiles, splitPathList } from "./desktop";
+import { pickDirectory, pickFiles, splitPathList } from "./desktop";
 import { FolderPicker, type FolderPickerKind } from "./FolderPicker";
 import { SettingsPanel } from "./Settings";
 import {
@@ -32,7 +32,7 @@ import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import "./App.css";
 
 type FolderPickerState = {
-  purpose: "index" | "hub" | "prompt-image";
+  purpose: "index" | "hub" | "prompt-image" | "vprompt";
   kind: FolderPickerKind;
 };
 
@@ -126,6 +126,8 @@ type PromptPreset = {
   categoryId?: string | null;
   createdAt: string;
   updatedAt: string;
+  sourceKind?: string;
+  sourceUid?: string | null;
 };
 
 type PromptCategory = {
@@ -133,6 +135,29 @@ type PromptCategory = {
   name: string;
   createdAt: string;
   itemCount?: number;
+  sourceKey?: string | null;
+};
+
+type VpromptStatus = {
+  root: string;
+  ready: boolean;
+  lastSyncAt?: string | null;
+  lastRunId?: string | null;
+  lastInserted?: number;
+  lastUpdated?: number;
+  lastPruned?: number;
+  lastTotal?: number;
+};
+
+type VpromptSyncResult = {
+  runId: string;
+  root: string;
+  categories: number;
+  inserted: number;
+  updated: number;
+  pruned: number;
+  total: number;
+  skipped: number;
 };
 
 type MinedPrompt = {
@@ -412,6 +437,18 @@ function sourceKindLabel(kind?: string | null): string {
       return "AI创作";
     default:
       return kind || "本地";
+  }
+}
+
+function isPinterestUrl(url: string): boolean {
+  const raw = url.trim();
+  if (!raw) return false;
+  try {
+    const host = new URL(raw).hostname.replace(/^www\./i, "").toLowerCase();
+    return host === "pinterest.com" || host.endsWith(".pinterest.com") || host === "pin.it";
+  } catch {
+    const l = raw.toLowerCase();
+    return l.includes("pinterest.com") || l.includes("pin.it");
   }
 }
 
@@ -705,6 +742,7 @@ export default function App() {
   const [sourceKind, setSourceKind] = useState<"rss" | "url_list" | "html_page">("rss");
   const [sourceInterval, setSourceInterval] = useState(360);
   const [sourceFilterId, setSourceFilterId] = useState<string | null>(null);
+  const pinterestWatch = isPinterestUrl(sourceUrl);
 
   const [genJobs, setGenJobs] = useState<GenJob[]>([]);
   const [genPrompt, setGenPrompt] = useState("");
@@ -726,6 +764,8 @@ export default function App() {
   const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
   const [promptFormOpen, setPromptFormOpen] = useState(false);
   const [appliedPromptId, setAppliedPromptId] = useState<string | null>(null);
+  const [vpromptStatus, setVpromptStatus] = useState<VpromptStatus | null>(null);
+  const vpromptAutoTried = useRef(false);
 
   const [browseKind, setBrowseKind] = useState<BrowseKind>(boot.browseKind);
   const [volumesRoot, setVolumesRoot] = useState(VOLUMES_VIRTUAL);
@@ -1866,6 +1906,10 @@ export default function App() {
       bindPromptImage(path);
       return;
     }
+    if (purpose === "vprompt") {
+      bindVpromptRoot(path).catch((e) => setStatus(`绑定片库失败: ${e}`));
+      return;
+    }
     try {
       if (purpose === "hub") {
         await bindHubFromPath(path);
@@ -1880,6 +1924,8 @@ export default function App() {
   const folderPickerCopy = folderPicker
     ? folderPicker.purpose === "prompt-image"
       ? { title: "选择参考图", confirmLabel: "选择" }
+      : folderPicker.purpose === "vprompt"
+      ? { title: "选择 VPromptStore 根目录", confirmLabel: "绑定" }
       : folderPicker.purpose === "hub"
       ? { title: "选择中转站文件夹", confirmLabel: "绑定" }
       : mode === "library"
@@ -2259,26 +2305,39 @@ export default function App() {
   const onCreateSource = async () => {
     const url = sourceUrl.trim();
     if (!url) {
-      setStatus("请填写 RSS、网页地址或图片 URL 列表");
+      setStatus("请填写 RSS、网页地址、Pinterest 看板或图片 URL 列表");
       return;
     }
+    const pinterest = isPinterestUrl(url);
+    const kind = pinterest ? "plugin_watch" : sourceKind;
+    const intervalMin = pinterest
+      ? sourceInterval >= 360
+        ? 15
+        : Math.max(sourceInterval, 5)
+      : sourceInterval;
     setBusy(true);
     try {
       const src = await invoke<Source>("create_source", {
         req: {
           name: sourceName.trim() || url,
-          kind: sourceKind,
+          kind,
           url,
-          intervalMin: sourceInterval,
+          intervalMin,
           folderId,
         },
       });
       setSourceName("");
       setSourceUrl("");
-      setStatus(`已添加订阅「${src.name}」，正在拉取…`);
-      const result = await invoke<ImportResult>("pull_source", { sourceId: src.id });
       setSourceFilterId(src.id);
       await refreshSources();
+      if (src.kind === "plugin_watch") {
+        setStatus(
+          `已添加盯梢「${src.name}」。请加载 Chrome 插件并登录 Pinterest，插件会自动打开看板、按间隔入库新图。`,
+        );
+        return;
+      }
+      setStatus(`已添加订阅「${src.name}」，正在拉取…`);
+      const result = await invoke<ImportResult>("pull_source", { sourceId: src.id });
       await refreshSubscribeResults(src.id);
       setStatus(
         `订阅拉取完成 run_id=${result.runId} · 成功 ${result.imported} · 跳过 ${result.skipped}` +
@@ -2550,6 +2609,96 @@ export default function App() {
     await refreshPromptPresets();
     setStatus(`已删除分类「${cat.name}」`);
   };
+
+  const refreshVpromptStatus = useCallback(async () => {
+    const st = await invoke<VpromptStatus>("get_vprompt_status");
+    setVpromptStatus(st);
+    return st;
+  }, []);
+
+  const onSyncVprompt = useCallback(
+    async (silent = false) => {
+      setBusy(true);
+      if (!silent) setStatus("正在同步片库提示词…");
+      console.info("[inspirex]", { event: "vprompt_sync_start" });
+      try {
+        const result = await invoke<VpromptSyncResult>("sync_vprompt_prompts", {});
+        await refreshPromptPresets();
+        await refreshPromptCategories();
+        await refreshVpromptStatus();
+        console.info("[inspirex]", {
+          event: "vprompt_sync_ok",
+          runId: result.runId,
+          inserted: result.inserted,
+          updated: result.updated,
+          pruned: result.pruned,
+          total: result.total,
+        });
+        setStatus(
+          `片库已同步 ${result.total} 条（新增 ${result.inserted} · 更新 ${result.updated} · 移除 ${result.pruned}）`,
+        );
+      } catch (e) {
+        console.warn("[inspirex]", { event: "vprompt_sync_fail", err: String(e) });
+        setStatus(`同步片库失败: ${e}`);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshPromptCategories, refreshPromptPresets, refreshVpromptStatus],
+  );
+
+  const bindVpromptRoot = useCallback(
+    async (path: string) => {
+      setBusy(true);
+      try {
+        const st = await invoke<VpromptStatus>("set_vprompt_store_root", { path });
+        setVpromptStatus(st);
+        console.info("[inspirex]", { event: "vprompt_root_bind", root: st.root });
+        setStatus(`已绑定片库 ${st.root}`);
+        setBusy(false);
+        await onSyncVprompt(true);
+      } catch (e) {
+        setStatus(`绑定片库失败: ${e}`);
+        setBusy(false);
+      }
+    },
+    [onSyncVprompt],
+  );
+
+  const onBindVprompt = async () => {
+    try {
+      const picked = await pickDirectory();
+      if (picked.ok) {
+        if (picked.paths[0]) await bindVpromptRoot(picked.paths[0]);
+        return;
+      }
+      if (picked.reason === "cancel") return;
+    } catch (e) {
+      console.warn("[inspirex]", { event: "vprompt_pick_dir_fail", err: String(e) });
+    }
+    setFolderPicker({ purpose: "vprompt", kind: "local" });
+    setStatus("在弹窗里选择 VPromptStore 根目录（需含「图片提示词」）");
+  };
+
+  useEffect(() => {
+    if (mode !== "generate" || generateView !== "prompt") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const st = await refreshVpromptStatus();
+        if (cancelled) return;
+        if (!vpromptAutoTried.current && st.ready && !st.lastSyncAt) {
+          vpromptAutoTried.current = true;
+          await onSyncVprompt(true);
+        }
+      } catch {
+        /* 未绑定片库时忽略 */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, generateView, refreshVpromptStatus, onSyncVprompt]);
 
   const visiblePromptPresets = useMemo(() => {
     if (!promptCategoryId) return promptPresets;
@@ -3389,8 +3538,10 @@ export default function App() {
                 }
               >
                 {c.name}
+                {c.sourceKey ? <span className="nav-badge">片库</span> : null}
                 {c.itemCount ? <span className="nav-count">{c.itemCount}</span> : null}
               </a>
+              {c.sourceKey ? null : (
               <button
                 type="button"
                 className="nav-del"
@@ -3400,6 +3551,7 @@ export default function App() {
               >
                 ×
               </button>
+              )}
             </div>
           ))}
           <a
@@ -3527,7 +3679,7 @@ export default function App() {
             <div className="search-row">
               <div className="panel-title">
                 {mode === "subscribe"
-                  ? "订阅 / RSS"
+                  ? "订阅"
                   : generateView === "prompt"
                     ? promptCategoryId
                       ? promptCategories.find((c) => c.id === promptCategoryId)?.name ?? "常用 prompt"
@@ -3552,6 +3704,14 @@ export default function App() {
                       取消
                     </button>
                   ) : null}
+                  <button type="button" onClick={() => void onSyncVprompt(false)} disabled={busy}>
+                    同步片库
+                  </button>
+                  {vpromptStatus?.ready ? null : (
+                    <button type="button" onClick={() => void onBindVprompt()} disabled={busy}>
+                      绑定片库
+                    </button>
+                  )}
                   <button type="button" className="primary" onClick={openAddPromptForm}>
                     添加
                   </button>
@@ -3985,7 +4145,7 @@ export default function App() {
                 </select>
               </label>
               <label className="tag-label">
-                {sourceKind === "rss"
+                {pinterestWatch ? "Pinterest 看板 URL" : sourceKind === "rss"
                   ? "Feed URL"
                   : sourceKind === "html_page"
                     ? "网页 URL"
@@ -3993,12 +4153,18 @@ export default function App() {
                 <textarea
                   rows={3}
                   value={sourceUrl}
-                  onChange={(e) => setSourceUrl(e.target.value)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSourceUrl(v);
+                    if (isPinterestUrl(v)) {
+                      setSourceInterval((n) => (n >= 360 ? 15 : n));
+                    }
+                  }}
                   placeholder={
                     sourceKind === "rss"
-                      ? "https://example.com/feed.xml"
+                      ? "https://example.com/feed.xml 或 Pinterest 看板 URL"
                       : sourceKind === "html_page"
-                        ? "https://example.com/gallery"
+                        ? "https://example.com/gallery 或 Pinterest 看板 URL"
                         : "https://…/a.jpg\nhttps://…/b.png"
                   }
                 />
@@ -4029,15 +4195,17 @@ export default function App() {
                 </label>
               </div>
               <p className="hint">
-                公开 RSS 或静态网页即可（遵守 robots.txt，每次最多 30 张）。登录墙站点请用浏览器插件「本页多选保存」，不做无人值守爬取。
+                {pinterestWatch
+                  ? "检测到 Pinterest：将登记为插件盯梢（默认 15 分钟）。请加载 Chrome 插件并登录，插件会自动打开看板、滚动收集新 Pin 入库。后端不直连 Pinterest。"
+                  : "公开 RSS 或静态网页即可（遵守 robots.txt，每次最多 30 张）。Pinterest 看板直接粘贴 URL 即可自动盯梢。"}
               </p>
               <button type="button" className="primary" disabled={busy} onClick={onCreateSource}>
-                添加并拉取
+                {pinterestWatch ? "添加盯梢" : "添加并拉取"}
               </button>
               </div>
             {sources.length === 0 ? (
               <div className="empty">
-                <p>还没有订阅源。</p>
+                <p>还没有订阅源。可粘贴 Pinterest 看板 URL，由插件自动盯梢入库。</p>
               </div>
             ) : (
               sources.map((s) => (
@@ -4052,7 +4220,9 @@ export default function App() {
                       {sourceKindLabel(s.kind)}
                       {s.kind === "plugin_watch"
                         ? s.enabled
-                          ? " · 盯梢中（需保持页面打开）"
+                          ? isPinterestUrl(s.url)
+                            ? " · 自动盯梢中（插件可后台打开看板）"
+                            : " · 盯梢中（需保持页面打开）"
                           : " · 已暂停"
                         : ""}
                       {" · "}
@@ -4245,7 +4415,7 @@ export default function App() {
               <div className="empty">
                 <p>
                   {promptPresets.length === 0
-                    ? "还没有常用 prompt。点右上角「添加」，写入提示词并配参考图。"
+                    ? "还没有常用 prompt。可点右上角「同步片库」接入 VPromptStore，或「添加」自己写一条。"
                     : "这个分类还没有 prompt。点「添加」写入，或先看全部。"}
                 </p>
               </div>
@@ -4270,7 +4440,12 @@ export default function App() {
                       )}
                     </div>
                     <div className="card-meta prompt-tile-caption">
-                      <span className="name">{p.name}</span>
+                      <span className="name">
+                        {p.name}
+                        {p.sourceKind === "vprompt" ? (
+                          <span className="nav-badge">片库</span>
+                        ) : null}
+                      </span>
                       <span className="prompt-tile-text">{p.body}</span>
                     </div>
                   </button>

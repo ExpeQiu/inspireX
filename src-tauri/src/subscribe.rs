@@ -9,6 +9,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 const MAX_IMAGES_PER_PULL: usize = 30;
+const PINTEREST_WATCH_INTERVAL_MIN: i64 = 15;
 
 #[derive(Debug, Clone)]
 pub struct RemoteImage {
@@ -43,20 +44,28 @@ pub fn spawn_subscribe_poller(state: Arc<AppState>) {
 }
 
 pub fn create_source(state: &AppState, req: CreateSource) -> Result<Source, String> {
-    let kind = req.kind.trim().to_ascii_lowercase();
+    let mut kind = req.kind.trim().to_ascii_lowercase();
+    let url = req.url.trim().to_string();
+    if url.is_empty() {
+        return Err("url 不能为空".into());
+    }
+    if is_pinterest_url(&url) {
+        kind = "plugin_watch".into();
+    }
     if kind != "rss" && kind != "url_list" && kind != "html_page" && kind != "plugin_watch" {
         return Err(format!(
             "不支持的源类型: {kind}（rss | url_list | html_page | plugin_watch）"
         ));
     }
-    let url = req.url.trim().to_string();
-    if url.is_empty() {
-        return Err("url 不能为空".into());
-    }
     let name = if req.name.trim().is_empty() {
         url.chars().take(48).collect()
     } else {
         req.name.trim().to_string()
+    };
+    let default_interval = if kind == "plugin_watch" && is_pinterest_url(&url) {
+        PINTEREST_WATCH_INTERVAL_MIN
+    } else {
+        state.subscribe_poll_min
     };
     let now = chrono::Utc::now().to_rfc3339();
     let source = Source {
@@ -64,7 +73,7 @@ pub fn create_source(state: &AppState, req: CreateSource) -> Result<Source, Stri
         name,
         kind,
         url,
-        interval_min: req.interval_min.unwrap_or(state.subscribe_poll_min).max(5),
+        interval_min: req.interval_min.unwrap_or(default_interval).max(5),
         folder_id: req.folder_id.filter(|s| !s.is_empty()),
         enabled: true,
         last_run_at: None,
@@ -75,10 +84,11 @@ pub fn create_source(state: &AppState, req: CreateSource) -> Result<Source, Stri
     db::insert_source(&conn, &source).map_err(|e| e.to_string())?;
     log::info!(
         target: "inspirex",
-        "source_create id={} kind={} url={}",
+        "source_create id={} kind={} url={} interval_min={}",
         source.id,
         source.kind,
-        source.url
+        source.url,
+        source.interval_min
     );
     Ok(source)
 }
@@ -225,7 +235,7 @@ fn collect_source_images(source: &Source) -> Result<Vec<RemoteImage>, String> {
         "url_list" => Ok(parse_url_list(&source.url)),
         "html_page" => fetch_html_images(&source.url),
         "plugin_watch" => Err(
-            "盯梢源由浏览器插件定时扫描。请在 Chrome 中打开并登录该页，保持标签不关。"
+            "盯梢源由浏览器插件自动扫描。Pinterest 会后台打开看板；请保持 Chrome 已登录。"
                 .into(),
         ),
         _ => {
@@ -426,6 +436,10 @@ fn unescape(s: &str) -> String {
         .replace("&#39;", "'")
 }
 
+fn is_pinterest_url(url: &str) -> bool {
+    login_wall_reason(url).is_some()
+}
+
 fn login_wall_reason(url: &str) -> Option<&'static str> {
     let l = url.to_ascii_lowercase();
     let host = l
@@ -435,7 +449,7 @@ fn login_wall_reason(url: &str) -> Option<&'static str> {
     let host = host.split('/').next().unwrap_or(host);
     let host = host.strip_prefix("www.").unwrap_or(host);
     if host == "pinterest.com" || host.ends_with(".pinterest.com") || host == "pin.it" {
-        Some("Pinterest 为登录墙，订阅源无法无人值守抓取。请用浏览器插件在已打开的页面上「本页多选保存」。")
+        Some("Pinterest 为登录墙，后端不直连抓取。已改为插件盯梢：请启动 Chrome 插件，登录后会自动打开看板入库。")
     } else {
         None
     }
@@ -995,7 +1009,16 @@ mod tests {
     }
 
     #[test]
-    fn html_page_rejects_pinterest_without_network() {
+    fn pinterest_host_is_login_wall() {
+        assert!(login_wall_reason("https://www.pinterest.com/u/board/").is_some());
+        assert!(login_wall_reason("https://pin.it/abc").is_some());
+        assert!(login_wall_reason("https://example.com/gallery").is_none());
+        let err = fetch_html_images("https://www.pinterest.com/qiubin2021/board/f1/").unwrap_err();
+        assert!(err.contains("登录墙") || err.contains("插件"), "{err}");
+    }
+
+    #[test]
+    fn pinterest_url_coerces_to_plugin_watch() {
         let dir = tempdir().unwrap();
         let state = AppState::for_test(dir.path().join("Library"));
         state.ensure_dirs().unwrap();
@@ -1005,15 +1028,17 @@ mod tests {
                 name: "F1".into(),
                 kind: "html_page".into(),
                 url: "https://www.pinterest.com/qiubin2021/跑車/f1/".into(),
-                interval_min: Some(60),
+                interval_min: None,
                 folder_id: None,
             },
         )
         .unwrap();
+        assert_eq!(src.kind, "plugin_watch");
+        assert_eq!(src.interval_min, PINTEREST_WATCH_INTERVAL_MIN);
         let result = pull_source(&state, &src.id).unwrap();
         assert_eq!(result.imported, 0, "{result:?}");
         assert!(
-            result.errors.iter().any(|e| e.contains("登录墙")),
+            result.errors.iter().any(|e| e.contains("插件")),
             "{result:?}"
         );
     }

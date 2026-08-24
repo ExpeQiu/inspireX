@@ -308,6 +308,28 @@ def hub_status(cfg: CliConfig, *, demo_mode: bool) -> CommandResult:
     return _invoke_one(cfg, "hub-status", "get_hub_status", {})
 
 
+def prompt_status(cfg: CliConfig, *, demo_mode: bool) -> CommandResult:
+    if demo_mode:
+        info = demo.demo_vprompt_status()
+        env = CliEnvelope(module="prompt-status", data_source="demo", payload=info)
+        env.with_items([info])
+        return CommandResult(env)
+    return _invoke_one(cfg, "prompt-status", "get_vprompt_status", {})
+
+
+def prompt_sync(cfg: CliConfig, *, demo_mode: bool, root: str | None = None) -> CommandResult:
+    logger.info("cli_prompt_sync demo=%s root=%s", demo_mode, root)
+    if demo_mode:
+        info = demo.demo_vprompt_sync()
+        env = CliEnvelope(module="prompt-sync", data_source="demo", payload=info)
+        env.with_items([info])
+        return CommandResult(env)
+    args: dict[str, Any] = {}
+    if root:
+        args["root"] = root
+    return _invoke_one(cfg, "prompt-sync", "sync_vprompt_prompts", args)
+
+
 def _invoke_list(
     cfg: CliConfig,
     module: str,

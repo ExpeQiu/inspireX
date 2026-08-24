@@ -15,6 +15,8 @@ metadata:
     - tag-list
     - source-list
     - hub-status
+    - prompt-status
+    - prompt-sync
   human_required_commands:
     - asset-import
     - asset-import-url
@@ -82,6 +84,8 @@ inspirex -q --format json folder list
 inspirex -q --format json tag list
 inspirex -q --format json source list
 inspirex -q --format json hub status
+inspirex -q --format json prompt status
+inspirex -q --format json prompt sync
 ```
 
 ## 长任务说明

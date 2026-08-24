@@ -116,3 +116,29 @@ def demo_import_result(paths: list[str]) -> dict[str, Any]:
 
 def demo_health() -> dict[str, Any]:
     return {"ok": True, "service": "inspirex-ingest", "demo": True}
+
+
+def demo_vprompt_status() -> dict[str, Any]:
+    return {
+        "root": "/Volumes/Lexar/git/12 highvalue/VPromptStore",
+        "ready": True,
+        "lastSyncAt": "2026-08-24T00:00:00+08:00",
+        "lastRunId": "demo-sync",
+        "lastInserted": 220,
+        "lastUpdated": 0,
+        "lastPruned": 0,
+        "lastTotal": 220,
+    }
+
+
+def demo_vprompt_sync() -> dict[str, Any]:
+    return {
+        "runId": "demo-sync",
+        "root": "/Volumes/Lexar/git/12 highvalue/VPromptStore",
+        "categories": 11,
+        "inserted": 0,
+        "updated": 220,
+        "pruned": 0,
+        "total": 220,
+        "skipped": 0,
+    }

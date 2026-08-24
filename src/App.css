@@ -759,6 +759,18 @@ button.primary {
   margin-left: 6px;
 }
 
+.nav-badge {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 5px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 .nav-sub .nav-item {
   padding-left: 22px;
   font-size: 14px;

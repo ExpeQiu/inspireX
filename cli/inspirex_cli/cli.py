@@ -274,6 +274,26 @@ def hub_status_cmd(ctx: click.Context) -> None:
     _finish(ctx, ops.hub_status(ctx.obj["cfg"], demo_mode=ctx.obj["demo"]))
 
 
+@cli.group()
+def prompt() -> None:
+    """AI 生图常用 prompt / 片库同步"""
+
+
+@prompt.command("status")
+@click.pass_context
+def prompt_status_cmd(ctx: click.Context) -> None:
+    """片库绑定与上次同步"""
+    _finish(ctx, ops.prompt_status(ctx.obj["cfg"], demo_mode=ctx.obj["demo"]))
+
+
+@prompt.command("sync")
+@click.option("--root", default=None, help="VPromptStore 根目录，默认用已绑定路径")
+@click.pass_context
+def prompt_sync_cmd(ctx: click.Context, root: Optional[str]) -> None:
+    """从 VPromptStore 同步图片提示词到 AI生图-prompt"""
+    _finish(ctx, ops.prompt_sync(ctx.obj["cfg"], demo_mode=ctx.obj["demo"], root=root))
+
+
 def main() -> int:
     try:
         cli(standalone_mode=True)

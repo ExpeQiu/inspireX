@@ -427,6 +427,25 @@ pub fn delete_prompt_category(
 }
 
 #[tauri::command]
+pub fn get_vprompt_status() -> Result<crate::vprompt::VpromptStatus, String> {
+    Ok(rpc::get_vprompt_status())
+}
+
+#[tauri::command]
+pub fn set_vprompt_store_root(path: String) -> Result<crate::vprompt::VpromptStatus, String> {
+    rpc::set_vprompt_store_root(path)
+}
+
+#[tauri::command]
+pub fn sync_vprompt_prompts(
+    state: State<'_, Arc<AppState>>,
+    root: Option<String>,
+    path: Option<String>,
+) -> Result<crate::vprompt::VpromptSyncResult, String> {
+    rpc::sync_vprompt_prompts(&state, root.or(path))
+}
+
+#[tauri::command]
 pub fn get_ai_settings(
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::aisettings::AiServicesView, String> {

@@ -45,8 +45,9 @@ npm run tauri -- dev  # 直接打开原生窗口
 ## 当前能力
 
 - 外置卷 / 本地库 / **中转站**（绑定 iCloud 等云盘文件夹，存入后多端共享，不入灵犀库）
-- **订阅源**（RSS/Atom / 公开网页抽图 / URL 列表）定时或立即拉取入库
+- **订阅源**（RSS/Atom / 公开网页抽图 / URL 列表 / **Pinterest 看板自动盯梢**）定时或立即拉取入库
 - **AI 生图**（默认 MiniMax `image-01`；无 Key 时回退 Mock）
+- **常用 prompt / 片库同步**（VPromptStore 图片提示词进 AI生图-prompt，可重复同步）
 - 分类 + 标签 + 出处/笔记
 - FTS / 标签 / 颜色 / CLIP 以文搜图（Mock 或本地 transformers）
 - 拖出 / Finder / 删除

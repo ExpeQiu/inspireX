@@ -14,6 +14,7 @@ mod rpc;
 mod subscribe;
 mod thumb;
 mod video;
+mod vprompt;
 
 use library::AppState;
 use std::sync::Arc;
@@ -185,6 +186,9 @@ pub fn run() {
             commands::list_prompt_categories,
             commands::create_prompt_category,
             commands::delete_prompt_category,
+            commands::get_vprompt_status,
+            commands::set_vprompt_store_root,
+            commands::sync_vprompt_prompts,
             commands::get_ai_settings,
             commands::set_ai_settings,
         ])

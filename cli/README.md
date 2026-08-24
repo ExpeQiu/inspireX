@@ -26,6 +26,7 @@ Live（需 `./scripts/start.sh`）：
 ```bash
 inspirex -q --format json library info
 inspirex -q --format json asset search 风景 --clip
+inspirex -q --format json prompt status
 inspirex --dry-run asset import ./photo.png
 ```
 

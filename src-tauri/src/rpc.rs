@@ -177,6 +177,13 @@ struct PathArgs {
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
+struct VpromptSyncArgs {
+    root: Option<String>,
+    path: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
 struct KindPathArgs {
     kind: Option<String>,
     path: String,
@@ -1009,6 +1016,8 @@ pub fn create_prompt_preset(state: &AppState, req: CreatePromptPreset) -> Result
         category_id: normalize_category_id(&conn, req.category_id)?,
         created_at: now.clone(),
         updated_at: now,
+        source_kind: "local".into(),
+        source_uid: None,
     };
     db::insert_prompt_preset(&conn, &preset).map_err(|e| e.to_string())?;
     log::info!(
@@ -1073,6 +1082,7 @@ pub fn create_prompt_category(state: &AppState, name: String) -> Result<PromptCa
         name,
         created_at: chrono::Utc::now().to_rfc3339(),
         item_count: 0,
+        source_key: None,
     };
     let conn = state.open_db().map_err(|e| e.to_string())?;
     db::insert_prompt_category(&conn, &cat).map_err(|e| e.to_string())?;
@@ -1087,6 +1097,16 @@ pub fn create_prompt_category(state: &AppState, name: String) -> Result<PromptCa
 
 pub fn delete_prompt_category(state: &AppState, category_id: String) -> Result<bool, String> {
     let conn = state.open_db().map_err(|e| e.to_string())?;
+    if let Some(cat) = db::get_prompt_category(&conn, &category_id).map_err(|e| e.to_string())? {
+        if cat
+            .source_key
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("vprompt:")
+        {
+            return Err("片库分类由同步维护，不能手动删除".into());
+        }
+    }
     let ok = db::delete_prompt_category(&conn, &category_id).map_err(|e| e.to_string())?;
     log::info!(
         target: "inspirex",
@@ -1095,6 +1115,21 @@ pub fn delete_prompt_category(state: &AppState, category_id: String) -> Result<b
         ok
     );
     Ok(ok)
+}
+
+pub fn get_vprompt_status() -> crate::vprompt::VpromptStatus {
+    crate::vprompt::status()
+}
+
+pub fn set_vprompt_store_root(path: String) -> Result<crate::vprompt::VpromptStatus, String> {
+    crate::vprompt::set_root(path)
+}
+
+pub fn sync_vprompt_prompts(
+    state: &AppState,
+    root: Option<String>,
+) -> Result<crate::vprompt::VpromptSyncResult, String> {
+    crate::vprompt::sync_prompts(state, root)
 }
 
 pub fn get_ai_settings(state: &AppState) -> crate::aisettings::AiServicesView {
@@ -1331,6 +1366,15 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
             let a: PromptCategoryIdArgs = parse(&args)?;
             json_ok(delete_prompt_category(state, a.category_id)?)
         }
+        "get_vprompt_status" => json_ok(get_vprompt_status()),
+        "set_vprompt_store_root" => {
+            let a: PathArgs = parse(&args)?;
+            json_ok(set_vprompt_store_root(a.path)?)
+        }
+        "sync_vprompt_prompts" => {
+            let a: VpromptSyncArgs = parse(&args)?;
+            json_ok(sync_vprompt_prompts(state, a.root.or(a.path))?)
+        }
         "get_ai_settings" => json_ok(get_ai_settings(state)),
         "set_ai_settings" => {
             let a: crate::aisettings::AiServicesPatch = parse(&args)?;
@@ -1527,5 +1571,37 @@ mod tests {
         .unwrap();
         assert_eq!(keep["image"]["apiKeySet"], true);
         assert_eq!(state.ai_image().api_key, "sk-live");
+    }
+
+    #[test]
+    fn dispatch_vprompt_sync_from_fixture() {
+        let store = tempfile::tempdir().unwrap();
+        let cat = store.path().join("图片提示词").join("Demo分类");
+        std::fs::create_dir_all(&cat).unwrap();
+        std::fs::write(
+            cat.join("样本集合.md"),
+            "## 1. Demo still\n\n**提示词：**\n暖色陶罐\n\n---\n",
+        )
+        .unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        let cfg = lib.path().join("vprompt.json");
+        let prev = std::env::var("INSPIREX_VPROMPT_CONFIG").ok();
+        std::env::set_var("INSPIREX_VPROMPT_CONFIG", &cfg);
+        let state = AppState::for_test(lib.path().join("Library"));
+        state.ensure_dirs().unwrap();
+        let synced = dispatch(
+            &state,
+            "sync_vprompt_prompts",
+            json!({"root": store.path().display().to_string()}),
+        )
+        .unwrap();
+        assert_eq!(synced["inserted"], 1);
+        assert_eq!(synced["total"], 1);
+        let listed = dispatch(&state, "list_prompt_presets", json!({})).unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        match prev {
+            Some(v) => std::env::set_var("INSPIREX_VPROMPT_CONFIG", v),
+            None => std::env::remove_var("INSPIREX_VPROMPT_CONFIG"),
+        }
     }
 }

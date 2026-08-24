@@ -53,11 +53,17 @@ async function refreshWatchUi() {
     watchBtn.textContent = resp.watching ? "停止盯梢" : "盯梢此页";
     const last = resp.source && (resp.source.lastError || resp.source.last_error);
     const when = resp.source && (resp.source.lastRunAt || resp.source.last_run_at);
+    const mins = resp.intervalMin || 60;
+    const pinterest = resp.pinterest;
     watchHint.textContent = resp.watching
-      ? "每 60 分钟扫描本页（需保持标签打开）" +
+      ? (pinterest
+          ? "Pinterest 自动盯梢 · 每 " + mins + " 分钟（可后台打开看板）"
+          : "每 " + mins + " 分钟扫描本页（需保持标签打开）") +
         (last ? " · 上次 " + last : "") +
         (when ? " · " + new Date(when).toLocaleString() : "")
-      : "盯梢后每 60 分钟自动入库新图；关标签则跳过该次。";
+      : pinterest
+        ? "盯梢后自动打开看板并入库新 Pin；请先在 Chrome 登录 Pinterest。"
+        : "盯梢后每 " + mins + " 分钟自动入库新图；关标签则跳过该次。";
   });
 }
 

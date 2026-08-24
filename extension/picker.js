@@ -23,7 +23,7 @@
     try {
       const u = new URL(url, location.href);
       if (!/(^|\.)pinimg\.com$/i.test(u.hostname)) return url;
-      u.pathname = u.pathname.replace(/\/\d+x\//, "/736x/");
+      u.pathname = u.pathname.replace(/\/\d+x\//, "/originals/");
       return u.href;
     } catch {
       return url;

@@ -85,6 +85,8 @@ def test_folder_tag_source_hub_demo():
         ["tag", "list"],
         ["source", "list"],
         ["hub", "status"],
+        ["prompt", "status"],
+        ["prompt", "sync"],
         ["folder", "create", "海报"],
         ["tag", "create", "红"],
         ["source", "pull", "demo-source-1"],

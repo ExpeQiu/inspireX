@@ -203,6 +203,10 @@ pub struct GenerateRequest {
     pub folder_id: Option<String>,
 }
 
+fn default_local_source() -> String {
+    "local".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptPreset {
@@ -215,6 +219,10 @@ pub struct PromptPreset {
     pub category_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default = "default_local_source")]
+    pub source_kind: String,
+    #[serde(default)]
+    pub source_uid: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +256,8 @@ pub struct PromptCategory {
     pub created_at: String,
     #[serde(default)]
     pub item_count: i64,
+    #[serde(default)]
+    pub source_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

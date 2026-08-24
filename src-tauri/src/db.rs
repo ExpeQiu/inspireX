@@ -151,6 +151,17 @@ fn migrate(conn: &Connection) -> DbResult<()> {
     add_column_if_missing(conn, "gen_jobs", "output_paths", "TEXT NOT NULL DEFAULT '[]'")?;
     add_column_if_missing(conn, "prompt_presets", "image_path", "TEXT")?;
     add_column_if_missing(conn, "prompt_presets", "category_id", "TEXT")?;
+    add_column_if_missing(conn, "prompt_presets", "source_kind", "TEXT NOT NULL DEFAULT 'local'")?;
+    add_column_if_missing(conn, "prompt_presets", "source_uid", "TEXT")?;
+    add_column_if_missing(conn, "prompt_categories", "source_key", "TEXT")?;
+    conn.execute_batch(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_presets_source_uid
+            ON prompt_presets(source_uid) WHERE source_uid IS NOT NULL AND source_uid != '';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_categories_source_key
+            ON prompt_categories(source_key) WHERE source_key IS NOT NULL AND source_key != '';
+        "#,
+    )?;
     Ok(())
 }
 
@@ -1010,11 +1021,12 @@ pub fn get_gen_job(conn: &Connection, id: &str) -> DbResult<Option<GenJob>> {
 }
 
 const PROMPT_PRESET_SELECT: &str = r#"
-    SELECT id, name, body, image_path, category_id, created_at, updated_at
+    SELECT id, name, body, image_path, category_id, created_at, updated_at, source_kind, source_uid
     FROM prompt_presets
 "#;
 
 fn map_prompt_preset(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptPreset> {
+    let source_kind: String = row.get(7)?;
     Ok(PromptPreset {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -1023,13 +1035,24 @@ fn map_prompt_preset(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptPreset> 
         category_id: row.get(4)?,
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
+        source_kind: if source_kind.trim().is_empty() {
+            "local".into()
+        } else {
+            source_kind
+        },
+        source_uid: row.get(8)?,
     })
 }
 
 pub fn insert_prompt_preset(conn: &Connection, preset: &PromptPreset) -> DbResult<()> {
+    let kind = if preset.source_kind.trim().is_empty() {
+        "local"
+    } else {
+        preset.source_kind.trim()
+    };
     conn.execute(
-        r#"INSERT INTO prompt_presets (id, name, body, image_path, category_id, created_at, updated_at)
-           VALUES (?1,?2,?3,?4,?5,?6,?7)"#,
+        r#"INSERT INTO prompt_presets (id, name, body, image_path, category_id, created_at, updated_at, source_kind, source_uid)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"#,
         params![
             preset.id,
             preset.name,
@@ -1037,7 +1060,9 @@ pub fn insert_prompt_preset(conn: &Connection, preset: &PromptPreset) -> DbResul
             preset.image_path,
             preset.category_id,
             preset.created_at,
-            preset.updated_at
+            preset.updated_at,
+            kind,
+            preset.source_uid
         ],
     )?;
     Ok(())
@@ -1061,14 +1086,20 @@ pub fn get_prompt_preset(conn: &Connection, id: &str) -> DbResult<Option<PromptP
 
 pub fn update_prompt_preset(conn: &Connection, preset: &PromptPreset) -> DbResult<bool> {
     let n = conn.execute(
-        "UPDATE prompt_presets SET name = ?2, body = ?3, image_path = ?4, category_id = ?5, updated_at = ?6 WHERE id = ?1",
+        "UPDATE prompt_presets SET name = ?2, body = ?3, image_path = ?4, category_id = ?5, updated_at = ?6, source_kind = ?7, source_uid = ?8 WHERE id = ?1",
         params![
             preset.id,
             preset.name,
             preset.body,
             preset.image_path,
             preset.category_id,
-            preset.updated_at
+            preset.updated_at,
+            if preset.source_kind.trim().is_empty() {
+                "local"
+            } else {
+                preset.source_kind.trim()
+            },
+            preset.source_uid
         ],
     )?;
     Ok(n > 0)
@@ -1081,7 +1112,8 @@ pub fn delete_prompt_preset(conn: &Connection, id: &str) -> DbResult<bool> {
 
 const PROMPT_CATEGORY_SELECT: &str = r#"
     SELECT id, name, created_at,
-           (SELECT COUNT(*) FROM prompt_presets p WHERE p.category_id = prompt_categories.id)
+           (SELECT COUNT(*) FROM prompt_presets p WHERE p.category_id = prompt_categories.id),
+           source_key
     FROM prompt_categories
 "#;
 
@@ -1091,13 +1123,14 @@ fn map_prompt_category(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptCatego
         name: row.get(1)?,
         created_at: row.get(2)?,
         item_count: row.get(3)?,
+        source_key: row.get(4)?,
     })
 }
 
 pub fn insert_prompt_category(conn: &Connection, cat: &PromptCategory) -> DbResult<()> {
     conn.execute(
-        "INSERT INTO prompt_categories (id, name, created_at) VALUES (?1,?2,?3)",
-        params![cat.id, cat.name, cat.created_at],
+        "INSERT INTO prompt_categories (id, name, created_at, source_key) VALUES (?1,?2,?3,?4)",
+        params![cat.id, cat.name, cat.created_at, cat.source_key],
     )?;
     Ok(())
 }
@@ -1124,6 +1157,56 @@ pub fn delete_prompt_category(conn: &Connection, id: &str) -> DbResult<bool> {
         params![id],
     )?;
     let n = conn.execute("DELETE FROM prompt_categories WHERE id = ?1", params![id])?;
+    Ok(n > 0)
+}
+
+pub fn get_prompt_category_by_source_key(
+    conn: &Connection,
+    source_key: &str,
+) -> DbResult<Option<PromptCategory>> {
+    conn.query_row(
+        &format!("{PROMPT_CATEGORY_SELECT} WHERE source_key = ?1"),
+        params![source_key],
+        map_prompt_category,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn update_prompt_category_name(conn: &Connection, id: &str, name: &str) -> DbResult<bool> {
+    let n = conn.execute(
+        "UPDATE prompt_categories SET name = ?2 WHERE id = ?1",
+        params![id, name],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn get_prompt_preset_by_source_uid(
+    conn: &Connection,
+    source_uid: &str,
+) -> DbResult<Option<PromptPreset>> {
+    conn.query_row(
+        &format!("{PROMPT_PRESET_SELECT} WHERE source_uid = ?1"),
+        params![source_uid],
+        map_prompt_preset,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn list_prompt_source_uids(conn: &Connection, source_kind: &str) -> DbResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT source_uid FROM prompt_presets WHERE source_kind = ?1 AND source_uid IS NOT NULL AND source_uid != ''",
+    )?;
+    let rows = stmt.query_map(params![source_kind], |row| row.get::<_, String>(0))?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+pub fn delete_prompt_preset_by_source_uid(conn: &Connection, source_uid: &str) -> DbResult<bool> {
+    let n = conn.execute(
+        "DELETE FROM prompt_presets WHERE source_uid = ?1",
+        params![source_uid],
+    )?;
     Ok(n > 0)
 }
 
@@ -1157,6 +1240,8 @@ mod tests {
             category_id: None,
             created_at: now.clone(),
             updated_at: now.clone(),
+            source_kind: "local".into(),
+            source_uid: None,
         };
         insert_prompt_preset(&conn, &preset).unwrap();
         let listed = list_prompt_presets(&conn).unwrap();
@@ -1188,6 +1273,7 @@ mod tests {
             name: "静物".into(),
             created_at: now.clone(),
             item_count: 0,
+            source_key: None,
         };
         insert_prompt_category(&conn, &cat).unwrap();
         let preset = PromptPreset {
@@ -1198,6 +1284,8 @@ mod tests {
             category_id: Some("c1".into()),
             created_at: now.clone(),
             updated_at: now,
+            source_kind: "local".into(),
+            source_uid: None,
         };
         insert_prompt_preset(&conn, &preset).unwrap();
         let listed = list_prompt_categories(&conn).unwrap();
