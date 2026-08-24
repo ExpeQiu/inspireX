@@ -15,7 +15,7 @@ npm run tauri -- dev  # 直接打开原生窗口
 ./scripts/bundle-macos.sh   # 打本机 DMG → dist/macos/
 ```
 
-安装：打开 `dist/macos/InspireX_0.1.0_aarch64.dmg`，把 InspireX 拖到「应用程序」。首次若被拦截，右键 → 打开。
+安装：打开 `dist/macos/InspireX_0.3.0_aarch64.dmg`，把 InspireX 拖到「应用程序」。首次若被拦截，右键 → 打开。
 
 点 Dock / 任务栏里的灵犀图标也会显示窗口（即使当时是浏览器模式）。
 

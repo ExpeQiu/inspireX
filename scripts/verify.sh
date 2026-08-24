@@ -31,6 +31,13 @@ source .env
 set +a
 export AI_MOCK_MODE="${AI_MOCK_MODE:-true}"
 
+# cargo test 会读环境变量；用户 .env 里的 Key/Provider 不能串进单测
+unset IMAGE_GEN_PROVIDER IMAGE_GEN_API_KEY IMAGE_GEN_BASE_URL IMAGE_GEN_MODEL
+unset MINIMAX_API_KEY MINIMAX_BASE_URL MINIMAX_IMAGE_MODEL
+unset TEXT_GEN_PROVIDER TEXT_GEN_API_KEY TEXT_GEN_BASE_URL TEXT_GEN_MODEL
+unset VIDEO_GEN_PROVIDER VIDEO_GEN_API_KEY VIDEO_GEN_BASE_URL VIDEO_GEN_MODEL
+unset INSPIREX_AI_CONFIG INSPIREX_VPROMPT_CONFIG VPROMPT_STORE_ROOT
+
 command -v npm >/dev/null || fail "需要 npm"
 command -v cargo >/dev/null || fail "需要 cargo/rustc"
 
@@ -42,7 +49,7 @@ ok "node_modules"
 echo "[verify] cargo test (mock CLIP + db)"
 (
   cd src-tauri
-  cargo test --quiet
+  cargo test --quiet -- --test-threads=1
 )
 ok "cargo test"
 
@@ -70,14 +77,14 @@ PY
 
 (
   cd src-tauri
-  cargo test --quiet import_pipeline_mock -- --nocapture
-  cargo test --quiet rss_pull_then_skip_duplicate -- --nocapture
-  cargo test --quiet html_page_pull_then_skip_duplicate -- --nocapture
-  cargo test --quiet html_page_respects_robots_disallow -- --nocapture
-  cargo test --quiet plugin_watch_create_and_rust_does_not_crawl -- --nocapture
-  cargo test --quiet pinterest_url_coerces_to_plugin_watch -- --nocapture
-  cargo test --quiet pinterest_host_is_login_wall -- --nocapture
-  cargo test --quiet mock_single_and_batch -- --nocapture
+  cargo test --quiet import_pipeline_mock -- --nocapture --test-threads=1
+  cargo test --quiet rss_pull_then_skip_duplicate -- --nocapture --test-threads=1
+  cargo test --quiet html_page_pull_then_skip_duplicate -- --nocapture --test-threads=1
+  cargo test --quiet html_page_respects_robots_disallow -- --nocapture --test-threads=1
+  cargo test --quiet plugin_watch_create_and_rust_does_not_crawl -- --nocapture --test-threads=1
+  cargo test --quiet pinterest_url_coerces_to_plugin_watch -- --nocapture --test-threads=1
+  cargo test --quiet pinterest_host_is_login_wall -- --nocapture --test-threads=1
+  cargo test --quiet mock_single_and_batch -- --nocapture --test-threads=1
 )
 ok "mock import / rss / imagegen"
 

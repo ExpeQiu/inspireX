@@ -1,6 +1,6 @@
 [package]
 name = "inspirex"
-version = "0.1.0"
+version = "0.3.0"
 description = "InspireX — personal local visual asset library"
 authors = ["expe"]
 edition = "2021"
