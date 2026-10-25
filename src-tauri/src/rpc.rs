@@ -21,7 +21,7 @@ use crate::pipeline::{color_distance, cosine_similarity, parse_hex_color};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +43,9 @@ fn placeholder_media(path: &str) -> ExternalItem {
         file_size: None,
         modified_at: None,
         mime: None,
+        people: Vec::new(),
+        place: None,
+        keywords: Vec::new(),
     }
 }
 
@@ -203,6 +206,9 @@ struct BrowseDirArgs {
     limit: Option<usize>,
     offset: Option<usize>,
     kind: Option<String>,
+    person: Option<String>,
+    place: Option<String>,
+    keyword: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -720,10 +726,28 @@ pub fn list_browse_dir(
     limit: Option<usize>,
     offset: Option<usize>,
     kind: Option<String>,
+    person: Option<String>,
+    place: Option<String>,
+    keyword: Option<String>,
 ) -> Result<ExternalListing, String> {
     let kind = parse_browse_kind(kind.as_deref()).to_string();
     let target = path.filter(|p| !p.trim().is_empty()).map(PathBuf::from);
-    list_browse_for_kind(target, &kind, limit.unwrap_or(72), offset.unwrap_or(0))
+    let filter = crate::browse::PhotosBrowseFilter {
+        person: person.filter(|s| !s.trim().is_empty()),
+        place: place.filter(|s| !s.trim().is_empty()),
+        keyword: keyword.filter(|s| !s.trim().is_empty()),
+    };
+    crate::browse::list_browse_for_kind_filtered(
+        target,
+        &kind,
+        limit.unwrap_or(72),
+        offset.unwrap_or(0),
+        filter,
+    )
+}
+
+pub fn get_photos_taxonomy(path: String) -> crate::photos_meta::PhotosTaxonomy {
+    crate::photos_meta::load_taxonomy(Path::new(&path))
 }
 
 pub fn list_picker_dir(
@@ -1260,13 +1284,25 @@ pub fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, Strin
         }
         "list_browse_dir" => {
             let a: BrowseDirArgs = parse(&args)?;
-            let listing = list_browse_dir(a.path, a.limit, a.offset, a.kind)?;
+            let listing = list_browse_dir(
+                a.path,
+                a.limit,
+                a.offset,
+                a.kind,
+                a.person,
+                a.place,
+                a.keyword,
+            )?;
             crate::thumb::spawn_warmup(
                 state.library_path.clone(),
                 listing.media.iter().map(|m| m.path.clone()).collect(),
                 240,
             );
             json_ok(listing)
+        }
+        "get_photos_taxonomy" => {
+            let a: PathArgs = parse(&args)?;
+            json_ok(get_photos_taxonomy(a.path))
         }
         "list_picker_dir" => {
             let a: PickerDirArgs = parse(&args)?;

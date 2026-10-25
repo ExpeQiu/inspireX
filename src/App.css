@@ -923,11 +923,37 @@ button.danger {
   column-span: all;
   display: flex;
   justify-content: center;
-  padding: 12px 0 4px;
+  padding: 16px 0 8px;
+  min-height: 40px;
 }
 
-.load-more button {
-  min-width: 220px;
+.load-more-status {
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: 12px;
+  color: var(--muted, #888);
+  letter-spacing: 0.02em;
+}
+
+.detail-progressive {
+  position: relative;
+  width: 100%;
+}
+
+.detail-progressive .detail-thumb-placeholder,
+.detail-progressive .detail-orig-ready,
+.detail-progressive .detail-orig-loading {
+  width: 100%;
+  height: auto;
+  max-height: 48vh;
+  object-fit: contain;
+  display: block;
+}
+
+.detail-progressive .detail-orig-loading {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .card-meta {

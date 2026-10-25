@@ -175,6 +175,19 @@ type ExternalItem = {
   fileSize?: number | null;
   modifiedAt?: number | null;
   mime?: string | null;
+  people?: string[];
+  place?: string | null;
+  keywords?: string[];
+};
+
+type PhotosTaxonomyItem = { name: string; count: number };
+type PhotosTaxonomy = {
+  libraryPath: string;
+  people: PhotosTaxonomyItem[];
+  places: PhotosTaxonomyItem[];
+  keywords: PhotosTaxonomyItem[];
+  available: boolean;
+  detail?: string | null;
 };
 
 type ExternalListing = {
@@ -305,6 +318,11 @@ function displayFolderName(name: string): string {
   return name;
 }
 
+function isPhotosLibraryPath(path: string | null | undefined): boolean {
+  if (!path) return false;
+  return /\.photoslibrary$/i.test(path.replace(/\/+$/, ""));
+}
+
 function loadSidebarHidden(): Set<string> {
   try {
     const raw = localStorage.getItem(SIDEBAR_HIDDEN_KEY);
@@ -390,9 +408,17 @@ function absInLibrary(libraryRoot: string, rel: string): string {
   return `${libraryRoot.replace(/\/$/, "")}/${rel}`;
 }
 
-function assetSrc(libraryRoot: string, asset: Asset): string {
-  const rel = asset.thumbPath || asset.storedPath;
-  return convertFileSrc(absInLibrary(libraryRoot, rel));
+/** 网格用小图：优先库内 thumb，否则走 browse/thumb 缩放。 */
+function assetThumbSrc(libraryRoot: string, asset: Asset): string {
+  if (asset.thumbPath) {
+    return convertFileSrc(absInLibrary(libraryRoot, asset.thumbPath));
+  }
+  return thumbSrc(absInLibrary(libraryRoot, asset.storedPath), 240);
+}
+
+/** 详情原图：始终用 storedPath。 */
+function assetOriginalSrc(libraryRoot: string, asset: Asset): string {
+  return convertFileSrc(absInLibrary(libraryRoot, asset.storedPath));
 }
 
 function fmtSize(n?: number | null): string {
@@ -578,6 +604,7 @@ function ExternalThumb({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [visible, setVisible] = useState(large);
   const [useOrig, setUseOrig] = useState(false);
+  const [origReady, setOrigReady] = useState(false);
   const [err, setErr] = useState(false);
   const [ratio, setRatio] = useState(
     () =>
@@ -602,6 +629,7 @@ function ExternalThumb({
     setRatio(cached ?? (item.kind === "video" ? "16 / 9" : "3 / 4"));
     setReady(Boolean(cached) || item.kind === "video");
     setUseOrig(false);
+    setOrigReady(false);
     setErr(false);
     if (!large) setVisible(false);
   }, [item.path, item.kind, large]);
@@ -623,11 +651,9 @@ function ExternalThumb({
     return () => io.disconnect();
   }, [item.path, large, visible]);
 
-  const src = !visible
-    ? null
-    : useOrig
-      ? convertFileSrc(item.path)
-      : thumbSrc(item.path, large ? 960 : 240);
+  const thumb = visible ? thumbSrc(item.path, 240) : null;
+  const original = convertFileSrc(item.path);
+  const gridSrc = useOrig ? original : thumb;
 
   let body: ReactNode;
   if (err) {
@@ -636,14 +662,14 @@ function ExternalThumb({
         {item.kind === "video" ? "视频" : "无法预览"}
       </div>
     );
-  } else if (!visible || !src) {
+  } else if (!visible || !thumb) {
     body = <div className="thumb-fallback" />;
   } else if (item.kind === "video" && large) {
     body = (
       <div className="thumb-inner">
         <video
-          src={convertFileSrc(item.path)}
-          poster={src}
+          src={original}
+          poster={thumb}
           muted
           controls
           preload="metadata"
@@ -655,11 +681,39 @@ function ExternalThumb({
         />
       </div>
     );
+  } else if (large) {
+    // 详情：先显示已缓存小图，再换原图
+    body = (
+      <div className="thumb-inner detail-progressive">
+        {!origReady ? (
+          <img
+            src={thumb}
+            alt=""
+            decoding="async"
+            className="detail-thumb-placeholder"
+            onLoad={(e) =>
+              rememberRatio(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)
+            }
+          />
+        ) : null}
+        <img
+          src={original}
+          alt={item.name}
+          decoding="async"
+          className={origReady ? "detail-orig-ready" : "detail-orig-loading"}
+          onLoad={(e) => {
+            rememberRatio(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight);
+            setOrigReady(true);
+          }}
+          onError={() => setErr(true)}
+        />
+      </div>
+    );
   } else {
     body = (
       <div className="thumb-inner">
         <img
-          src={src}
+          src={gridSrc!}
           alt={item.name}
           loading="lazy"
           decoding="async"
@@ -699,6 +753,81 @@ function ExternalThumb({
   );
 }
 
+/** 入库素材详情：先小图占位，再拉原图。 */
+function DetailAssetPreview({
+  libraryRoot,
+  asset,
+}: {
+  libraryRoot: string;
+  asset: Asset;
+}) {
+  const thumb = assetThumbSrc(libraryRoot, asset);
+  const original = assetOriginalSrc(libraryRoot, asset);
+  const [origReady, setOrigReady] = useState(false);
+
+  useEffect(() => {
+    setOrigReady(false);
+  }, [asset.id]);
+
+  return (
+    <div className="detail-progressive">
+      {!origReady ? (
+        <img src={thumb} alt="" decoding="async" className="detail-thumb-placeholder" />
+      ) : null}
+      <img
+        src={original}
+        alt={asset.filename}
+        decoding="async"
+        className={origReady ? "detail-orig-ready" : "detail-orig-loading"}
+        onLoad={() => setOrigReady(true)}
+      />
+    </div>
+  );
+}
+
+/** 滚近底部提前加载下一页（约 400px 预取）。 */
+function LoadMoreTrigger({
+  active,
+  busy,
+  onLoadMore,
+  label,
+}: {
+  active: boolean;
+  busy: boolean;
+  onLoadMore: () => void;
+  label: string;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const onLoadMoreRef = useRef(onLoadMore);
+  const busyRef = useRef(busy);
+  onLoadMoreRef.current = onLoadMore;
+  busyRef.current = busy;
+
+  useEffect(() => {
+    if (!active || busy) return;
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        if (busyRef.current) return;
+        console.info("[inspirex]", { event: "load_more_scroll", label });
+        onLoadMoreRef.current();
+      },
+      { root: null, rootMargin: "400px 0px", threshold: 0 },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [active, busy, label]);
+
+  if (!active) return null;
+  return (
+    <div ref={ref} className="load-more" role="status">
+      <span className="load-more-status">{busy ? "加载中…" : label}</span>
+    </div>
+  );
+}
+
 export default function App() {
   const bootRef = useRef(parseAppUrl(window.location.pathname, window.location.search));
   const boot = bootRef.current;
@@ -721,6 +850,9 @@ export default function App() {
   const [libSelected, setLibSelected] = useState<Set<string>>(() => new Set());
   const [tagFilter, setTagFilter] = useState<string | null>(boot.tagFilter);
   const [colorFilter, setColorFilter] = useState<string | null>(boot.colorFilter);
+  const [photosPerson, setPhotosPerson] = useState<string | null>(null);
+  const [photosPlace, setPhotosPlace] = useState<string | null>(null);
+  const [photosTaxonomy, setPhotosTaxonomy] = useState<PhotosTaxonomy | null>(null);
   const [query, setQuery] = useState("");
   const [useClip, setUseClip] = useState(true);
   const [status, setStatus] = useState("");
@@ -792,11 +924,17 @@ export default function App() {
   const [libraryMedia, setLibraryMedia] = useState<ExternalItem[]>([]);
   const [libraryMediaTruncated, setLibraryMediaTruncated] = useState(false);
   const [libraryMediaTotal, setLibraryMediaTotal] = useState(0);
+  const [libraryLoadingMore, setLibraryLoadingMore] = useState(false);
   const libraryMediaRef = useRef<ExternalItem[]>([]);
+  const libraryLoadLockRef = useRef(false);
   libraryMediaRef.current = libraryMedia;
   const browseAnchorRef = useRef<string | null>(null);
   const tagFilterRef = useRef<string | null>(null);
   tagFilterRef.current = tagFilter;
+  const photosPersonRef = useRef<string | null>(null);
+  photosPersonRef.current = photosPerson;
+  const photosPlaceRef = useRef<string | null>(null);
+  photosPlaceRef.current = photosPlace;
   const libDragRef = useRef<{ asset: Asset; x: number; y: number } | null>(null);
   const libDragStarted = useRef(false);
 
@@ -1272,6 +1410,30 @@ export default function App() {
         setBrowseSelected(new Set());
       }
       const tag = tagFilterRef.current;
+      const person = photosPersonRef.current;
+      const place = photosPlaceRef.current;
+      if (isPhotosLibraryPath(target) && !append) {
+        try {
+          const tax = await invoke<PhotosTaxonomy>("get_photos_taxonomy", { path: target });
+          if (req === browseReqId.current) setPhotosTaxonomy(tax);
+          console.info("[inspirex]", {
+            event: "photos_taxonomy",
+            available: tax.available,
+            people: tax.people?.length ?? 0,
+            places: tax.places?.length ?? 0,
+            detail: tax.detail,
+          });
+        } catch (e) {
+          if (req === browseReqId.current) setPhotosTaxonomy(null);
+          console.warn("[inspirex]", { event: "photos_taxonomy_fail", err: String(e) });
+        }
+      } else if (!isPhotosLibraryPath(target) && !append) {
+        setPhotosTaxonomy(null);
+        if (photosPersonRef.current || photosPlaceRef.current) {
+          setPhotosPerson(null);
+          setPhotosPlace(null);
+        }
+      }
       const data = tag
         ? await invoke<ExternalListing>("list_browse_by_tag", {
             path: target,
@@ -1285,6 +1447,8 @@ export default function App() {
             kind: browseKind,
             limit: BROWSE_PAGE_SIZE,
             offset,
+            person: person || undefined,
+            place: place || undefined,
           });
       if (req !== browseReqId.current) return;
       // 不回写 browsePath（canonicalize 路径与请求不一致会触发刷新死循环）
@@ -1314,11 +1478,17 @@ export default function App() {
       const atIndexVirtual =
         (browseKind === "local" && isKindVirtualPath(target, root || LOCAL_VIRTUAL)) ||
         (browseKind === "volumes" && isKindVirtualPath(target, root || VOLUMES_VIRTUAL));
+      const photosHint = [
+        person ? `人物 · ${person}` : "",
+        place ? `地点 · ${place}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
       setStatus(
-        (tag ? `标签 · ${tag} · ` : atIndexVirtual
+        (tag ? `标签 · ${tag} · ` : photosHint ? `${photosHint} · ` : atIndexVirtual
           ? `${sourceLabel} · ${data.folders.length} 个索引目录`
           : `${sourceLabel} · ${target} · `) +
-          (atIndexVirtual && !tag
+          (atIndexVirtual && !tag && !photosHint
             ? ""
             : `${data.folders.length} 文件夹 · ${data.totalMedia} 媒体`) +
           (data.truncated || shown < data.totalMedia
@@ -1492,13 +1662,30 @@ export default function App() {
   const loadMoreBrowse = useCallback(() => {
     const cur = listingRef.current;
     if (!browsePath || !cur?.truncated || busy) return;
+    console.info("[inspirex]", {
+      event: "load_more_browse",
+      shown: cur.media.length,
+      total: cur.totalMedia,
+    });
     refreshBrowse(browsePath, true).catch((e) => setStatus(String(e)));
   }, [browsePath, busy, refreshBrowse]);
 
   const loadMoreLibrary = useCallback(() => {
-    if (!libraryMediaTruncated || busy) return;
-    refreshLibrary(true).catch((e) => setStatus(String(e)));
-  }, [libraryMediaTruncated, busy, refreshLibrary]);
+    if (!libraryMediaTruncated || libraryLoadLockRef.current) return;
+    libraryLoadLockRef.current = true;
+    setLibraryLoadingMore(true);
+    console.info("[inspirex]", {
+      event: "load_more_library",
+      shown: libraryMediaRef.current.length,
+      total: libraryMediaTotal,
+    });
+    refreshLibrary(true)
+      .catch((e) => setStatus(String(e)))
+      .finally(() => {
+        libraryLoadLockRef.current = false;
+        setLibraryLoadingMore(false);
+      });
+  }, [libraryMediaTruncated, libraryMediaTotal, refreshLibrary]);
 
   useEffect(() => {
     invoke<Tag[]>("list_tags")
@@ -1607,7 +1794,7 @@ export default function App() {
     }
     refreshBrowse(browsePath).catch((e) => setStatus(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅随导航/筛选变化加载，避免死循环
-  }, [mode, generateView, folderId, tagFilter, colorFilter, browsePath, browseKind, sourceFilterId, genFilterId, viewFolderId]);
+  }, [mode, generateView, folderId, tagFilter, colorFilter, photosPerson, photosPlace, browsePath, browseKind, sourceFilterId, genFilterId, viewFolderId]);
 
   useEffect(() => {
     if (mode !== "subscribe") return;
@@ -3400,12 +3587,90 @@ export default function App() {
                   spaNav(e, () => {
                     setViewFolderId(null);
                     setTagFilter(null);
+                    setPhotosPerson(null);
+                    setPhotosPlace(null);
                     setBrowsePath(listing.parent!);
                   })
                 }
               >
                 ↑ 上级
               </a>
+            ) : null}
+            {isPhotosLibraryPath(browsePath) ? (
+              <>
+                <div className="nav-label">
+                  人物
+                  {photosPerson ? (
+                    <button
+                      type="button"
+                      className="linkish linkish-sm"
+                      title="清除人物筛选"
+                      onClick={() => setPhotosPerson(null)}
+                    >
+                      清除
+                    </button>
+                  ) : null}
+                </div>
+                {!photosTaxonomy?.available ? (
+                  <div className="nav-hint">
+                    {photosTaxonomy?.detail
+                      ? "无法读取系统相册归类（需完全磁盘访问）"
+                      : "读取系统相册人物…"}
+                  </div>
+                ) : photosTaxonomy.people.length === 0 ? (
+                  <div className="nav-hint">暂无已命名人物</div>
+                ) : (
+                  photosTaxonomy.people.slice(0, 40).map((p) => (
+                    <button
+                      key={`person-${p.name}`}
+                      type="button"
+                      className={`nav-item ${photosPerson === p.name ? "active" : ""}`}
+                      onClick={() => {
+                        setTagFilter(null);
+                        setPhotosPlace(null);
+                        setPhotosPerson((cur) => (cur === p.name ? null : p.name));
+                      }}
+                    >
+                      {p.name}
+                      <span className="nav-count">{p.count}</span>
+                    </button>
+                  ))
+                )}
+                <div className="nav-label">
+                  地点
+                  {photosPlace ? (
+                    <button
+                      type="button"
+                      className="linkish linkish-sm"
+                      title="清除地点筛选"
+                      onClick={() => setPhotosPlace(null)}
+                    >
+                      清除
+                    </button>
+                  ) : null}
+                </div>
+                {!photosTaxonomy?.available ? (
+                  <div className="nav-hint">地点依赖相册 GPS</div>
+                ) : photosTaxonomy.places.length === 0 ? (
+                  <div className="nav-hint">暂无地点</div>
+                ) : (
+                  photosTaxonomy.places.slice(0, 40).map((p) => (
+                    <button
+                      key={`place-${p.name}`}
+                      type="button"
+                      className={`nav-item ${photosPlace === p.name ? "active" : ""}`}
+                      onClick={() => {
+                        setTagFilter(null);
+                        setPhotosPerson(null);
+                        setPhotosPlace((cur) => (cur === p.name ? null : p.name));
+                      }}
+                    >
+                      {p.name}
+                      <span className="nav-count">{p.count}</span>
+                    </button>
+                  ))
+                )}
+              </>
             ) : null}
           </>
         ) : null}
@@ -3926,7 +4191,7 @@ export default function App() {
                       title="单击详情 · 拖动可拖出"
                     >
                       <RatioThumb
-                        src={libraryRoot ? assetSrc(libraryRoot, a) : null}
+                        src={libraryRoot ? assetThumbSrc(libraryRoot, a) : null}
                         alt={a.filename}
                         cacheKey={a.id}
                         width={a.width}
@@ -4100,15 +4365,12 @@ export default function App() {
                     </button>
                   </div>
                 ))}
-                {listing.truncated ? (
-                  <div className="load-more">
-                    <button type="button" onClick={loadMoreBrowse} disabled={busy}>
-                      {busy
-                        ? "加载中…"
-                        : `加载更多（已 ${listing.media.length}/${listing.totalMedia}）`}
-                    </button>
-                  </div>
-                ) : null}
+                <LoadMoreTrigger
+                  active={Boolean(listing.truncated)}
+                  busy={busy}
+                  onLoadMore={loadMoreBrowse}
+                  label={`滚动加载更多（已 ${listing.media.length}/${listing.totalMedia}）`}
+                />
               </>
             )}
           </section>
@@ -4293,7 +4555,7 @@ export default function App() {
                       style={{ borderColor: a.dominantColor || "transparent" }}
                     >
                       <RatioThumb
-                        src={libraryRoot ? assetSrc(libraryRoot, a) : null}
+                        src={libraryRoot ? assetThumbSrc(libraryRoot, a) : null}
                         alt={a.filename}
                         cacheKey={a.id}
                         width={a.width}
@@ -4730,7 +4992,7 @@ export default function App() {
                       style={{ borderColor: a.dominantColor || "transparent" }}
                     >
                       <RatioThumb
-                        src={libraryRoot ? assetSrc(libraryRoot, a) : null}
+                        src={libraryRoot ? assetThumbSrc(libraryRoot, a) : null}
                         alt={a.filename}
                         cacheKey={a.id}
                         width={a.width}
@@ -4829,7 +5091,7 @@ export default function App() {
                     title="单击详情 · 拖动可拖出到其他应用"
                   >
                     <RatioThumb
-                      src={libraryRoot ? assetSrc(libraryRoot, a) : null}
+                      src={libraryRoot ? assetThumbSrc(libraryRoot, a) : null}
                       alt={a.filename}
                       cacheKey={a.id}
                       width={a.width}
@@ -4847,15 +5109,12 @@ export default function App() {
                   </button>
                 </div>
                 ))}
-                {libraryMediaTruncated ? (
-                  <div className="load-more">
-                    <button type="button" onClick={loadMoreLibrary} disabled={busy}>
-                      {busy
-                        ? "加载中…"
-                        : `加载更多链接图（已 ${libraryMedia.length}/${libraryMediaTotal}）`}
-                    </button>
-                  </div>
-                ) : null}
+                <LoadMoreTrigger
+                  active={libraryMediaTruncated}
+                  busy={libraryLoadingMore}
+                  onLoadMore={loadMoreLibrary}
+                  label={`滚动加载更多链接图（已 ${libraryMedia.length}/${libraryMediaTotal}）`}
+                />
               </>
             )}
           </section>
@@ -4992,7 +5251,7 @@ export default function App() {
           </button>
           <div className="detail-preview" style={{ background: selected.dominantColor || "#ddd" }}>
             {libraryRoot ? (
-              <img src={assetSrc(libraryRoot, selected)} alt={selected.filename} />
+              <DetailAssetPreview libraryRoot={libraryRoot} asset={selected} />
             ) : null}
           </div>
           <h2>{selected.filename}</h2>

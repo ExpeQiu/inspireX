@@ -26,6 +26,29 @@ pub struct ExternalItem {
     pub file_size: Option<i64>,
     pub modified_at: Option<i64>,
     pub mime: Option<String>,
+    /// 系统「照片」人物名（仅 .photoslibrary）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<String>,
+    /// 由相册 GPS 聚合的地点标签
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PhotosBrowseFilter {
+    pub person: Option<String>,
+    pub place: Option<String>,
+    pub keyword: Option<String>,
+}
+
+impl PhotosBrowseFilter {
+    pub fn is_empty(&self) -> bool {
+        self.person.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
+            && self.place.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
+            && self.keyword.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,6 +430,9 @@ pub fn list_index_listing(kind: &str) -> ExternalListing {
                     file_size: None,
                     modified_at: None,
                     mime: None,
+                people: Vec::new(),
+                place: None,
+                keywords: Vec::new(),
                 })
         })
         .collect();
@@ -442,6 +468,16 @@ pub fn list_browse_for_kind(
     media_limit: usize,
     media_offset: usize,
 ) -> Result<ExternalListing, String> {
+    list_browse_for_kind_filtered(path, kind, media_limit, media_offset, PhotosBrowseFilter::default())
+}
+
+pub fn list_browse_for_kind_filtered(
+    path: Option<PathBuf>,
+    kind: &str,
+    media_limit: usize,
+    media_offset: usize,
+    photos_filter: PhotosBrowseFilter,
+) -> Result<ExternalListing, String> {
     if index_kind_ok(kind) {
         let virtual_root = virtual_root_for(kind);
         let target = match &path {
@@ -455,7 +491,8 @@ pub fn list_browse_for_kind(
         let bound = matching_index_root(kind, &safe).ok_or_else(|| {
             format!("不在已绑定的{}索引内", index_kind_label(kind))
         })?;
-        let mut listing = list_external_dir(&safe, media_limit, media_offset, &bound)?;
+        let mut listing =
+            list_external_dir_filtered(&safe, media_limit, media_offset, &bound, &photos_filter)?;
         listing.root = virtual_root.to_string();
         if same_path(&safe, &bound) {
             listing.parent = Some(virtual_root.to_string());
@@ -468,7 +505,7 @@ pub fn list_browse_for_kind(
         _ => root.clone(),
     };
     let safe = ensure_under_kind(&target, kind)?;
-    list_external_dir(&safe, media_limit, media_offset, &root)
+    list_external_dir_filtered(&safe, media_limit, media_offset, &root, &photos_filter)
 }
 
 /// 外置卷 / 本地库绑定根 + 中转站（若已绑定）。
@@ -496,7 +533,7 @@ fn collect_media_under(root: &Path, cap: usize) -> Vec<ExternalItem> {
         return Vec::new();
     }
     if is_photos_library(root) {
-        return list_photos_library(root, cap, 0, root)
+        return list_photos_library(root, cap, 0, root, &PhotosBrowseFilter::default())
             .map(|l| l.media)
             .unwrap_or_default();
     }
@@ -525,7 +562,9 @@ fn collect_media_under(root: &Path, cap: usize) -> Vec<ExternalItem> {
         let p = entry.path();
         if entry.file_type().is_dir() {
             if is_photos_library(p) && p != root {
-                if let Ok(l) = list_photos_library(p, cap - out.len(), 0, p) {
+                if let Ok(l) =
+                    list_photos_library(p, cap - out.len(), 0, p, &PhotosBrowseFilter::default())
+                {
                     out.extend(l.media);
                 }
             }
@@ -709,6 +748,9 @@ pub fn list_picker_dir_under(
             file_size: None,
             modified_at: None,
             mime: None,
+        people: Vec::new(),
+        place: None,
+        keywords: Vec::new(),
         });
     }
 
@@ -1087,6 +1129,9 @@ pub fn item_from_path(p: &Path) -> Option<ExternalItem> {
         file_size,
         modified_at,
         mime,
+    people: Vec::new(),
+    place: None,
+    keywords: Vec::new(),
     })
 }
 
@@ -1122,6 +1167,22 @@ pub fn list_external_dir(
     media_offset: usize,
     listing_root: &Path,
 ) -> Result<ExternalListing, String> {
+    list_external_dir_filtered(
+        path,
+        media_limit,
+        media_offset,
+        listing_root,
+        &PhotosBrowseFilter::default(),
+    )
+}
+
+pub fn list_external_dir_filtered(
+    path: &Path,
+    media_limit: usize,
+    media_offset: usize,
+    listing_root: &Path,
+    photos_filter: &PhotosBrowseFilter,
+) -> Result<ExternalListing, String> {
     if !path.exists() {
         return Err(format!("路径不存在: {}", path.display()));
     }
@@ -1130,7 +1191,7 @@ pub fn list_external_dir(
     }
 
     if let Some(lib) = enclosing_photos_library(path) {
-        return list_photos_library(&lib, media_limit, media_offset, listing_root);
+        return list_photos_library(&lib, media_limit, media_offset, listing_root, photos_filter);
     }
 
     let t0 = std::time::Instant::now();
@@ -1203,6 +1264,9 @@ pub fn list_external_dir(
                     file_size,
                     modified_at,
                     mime: None,
+                people: Vec::new(),
+                place: None,
+                keywords: Vec::new(),
                 });
             }
             ExternalKind::Image | ExternalKind::Video => {
@@ -1230,6 +1294,9 @@ pub fn list_external_dir(
                     file_size,
                     modified_at,
                     mime,
+                people: Vec::new(),
+                place: None,
+                keywords: Vec::new(),
                 });
                 media_index += 1;
             }
@@ -1341,6 +1408,9 @@ fn photos_libraries_under(pictures: &Path) -> Vec<ExternalItem> {
                     .map(|d| d.as_secs() as i64)
             }),
             mime: None,
+        people: Vec::new(),
+        place: None,
+        keywords: Vec::new(),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1398,6 +1468,9 @@ fn item_from_resolved(
             })
         }),
         mime: guess_mime(&path).map(|s| s.to_string()),
+        people: Vec::new(),
+        place: None,
+        keywords: Vec::new(),
     }
 }
 
@@ -1429,6 +1502,9 @@ fn list_photos_via_sqlite(lib: &Path) -> Result<Vec<ExternalItem>, String> {
         })
         .map_err(|e| e.to_string())?;
 
+    let people_map = crate::photos_meta::people_by_filename(&conn);
+    let place_map = crate::photos_meta::place_by_filename(&conn);
+
     let mut items = Vec::new();
     for row in rows {
         let (dir, filename, _kind, created) = row.map_err(|e| e.to_string())?;
@@ -1436,8 +1512,24 @@ fn list_photos_via_sqlite(lib: &Path) -> Result<Vec<ExternalItem>, String> {
             continue;
         };
         let modified_at = created.map(|d| d as i64 + APPLE_EPOCH);
-        items.push(item_from_resolved(path, filename, kind, modified_at));
+        let key = (dir, filename.clone());
+        let mut item = item_from_resolved(path, filename, kind, modified_at);
+        if let Some(people) = people_map.get(&key) {
+            item.people = people.clone();
+        }
+        if let Some(place) = place_map.get(&key) {
+            item.place = Some(place.clone());
+        }
+        items.push(item);
     }
+    log::info!(
+        target: "inspirex",
+        "photos_sqlite_enriched lib={} items={} with_people={} with_place={}",
+        lib.display(),
+        items.len(),
+        items.iter().filter(|i| !i.people.is_empty()).count(),
+        items.iter().filter(|i| i.place.is_some()).count()
+    );
     Ok(items)
 }
 
@@ -1475,11 +1567,31 @@ fn list_photos_via_walk(lib: &Path) -> Vec<ExternalItem> {
     items
 }
 
+fn matches_photos_filter(item: &ExternalItem, filter: &PhotosBrowseFilter) -> bool {
+    if let Some(person) = filter.person.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if !item.people.iter().any(|p| p == person) {
+            return false;
+        }
+    }
+    if let Some(place) = filter.place.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if item.place.as_deref() != Some(place) {
+            return false;
+        }
+    }
+    if let Some(kw) = filter.keyword.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if !item.keywords.iter().any(|k| k == kw) {
+            return false;
+        }
+    }
+    true
+}
+
 fn list_photos_library(
     lib: &Path,
     media_limit: usize,
     media_offset: usize,
     listing_root: &Path,
+    photos_filter: &PhotosBrowseFilter,
 ) -> Result<ExternalListing, String> {
     let t0 = std::time::Instant::now();
     let (items, source) = match list_photos_via_sqlite(lib) {
@@ -1496,9 +1608,18 @@ fn list_photos_library(
         }
     };
 
-    let total_media = items.len();
+    let filtered: Vec<_> = if photos_filter.is_empty() {
+        items
+    } else {
+        items
+            .into_iter()
+            .filter(|i| matches_photos_filter(i, photos_filter))
+            .collect()
+    };
+
+    let total_media = filtered.len();
     let truncated = media_offset + media_limit < total_media;
-    let media = items
+    let media = filtered
         .into_iter()
         .skip(media_offset)
         .take(media_limit)
@@ -1518,13 +1639,15 @@ fn list_photos_library(
 
     log::info!(
         target: "inspirex",
-        "photos_list lib={} source={} total={} page={} offset={} truncated={} ms={}",
+        "photos_list lib={} source={} total={} page={} offset={} truncated={} filter_person={:?} filter_place={:?} ms={}",
         lib.display(),
         source,
         total_media,
         media.len(),
         media_offset,
         truncated,
+        photos_filter.person,
+        photos_filter.place,
         t0.elapsed().as_millis()
     );
 

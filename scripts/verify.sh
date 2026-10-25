@@ -15,6 +15,8 @@ ok() { echo "OK: $*"; }
 [[ -f ADR/006-browser-primary-ui.md ]] || fail "缺少 ADR-006"
 [[ -f ADR/007-cli-standard.md ]] || fail "缺少 ADR-007"
 [[ -f ADR/008-vprompt-sync.md ]] || fail "缺少 ADR-008"
+[[ -f ADR/009-reuse-photos-classify.md ]] || fail "缺少 ADR-009"
+[[ -f guide/复用系统相册归类_20261025.md ]] || fail "缺少相册归类指南"
 [[ -f src-tauri/Cargo.toml ]] || fail "缺少 src-tauri"
 [[ -f cli/pyproject.toml ]] || fail "缺少 cli/pyproject.toml"
 [[ -f cli/SKILL.md ]] || fail "缺少 cli/SKILL.md"

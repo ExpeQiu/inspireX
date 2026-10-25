@@ -212,8 +212,22 @@ pub async fn list_browse_dir(
     limit: Option<usize>,
     offset: Option<usize>,
     kind: Option<String>,
+    person: Option<String>,
+    place: Option<String>,
+    keyword: Option<String>,
 ) -> Result<ExternalListing, String> {
-    tauri::async_runtime::spawn_blocking(move || rpc::list_browse_dir(path, limit, offset, kind))
+    tauri::async_runtime::spawn_blocking(move || {
+        rpc::list_browse_dir(path, limit, offset, kind, person, place, keyword)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn get_photos_taxonomy(
+    path: String,
+) -> Result<crate::photos_meta::PhotosTaxonomy, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(rpc::get_photos_taxonomy(path)))
         .await
         .map_err(|e| e.to_string())?
 }
