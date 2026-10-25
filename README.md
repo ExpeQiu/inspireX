@@ -15,7 +15,7 @@ npm run tauri -- dev  # 直接打开原生窗口
 ./scripts/bundle-macos.sh   # 打本机 DMG → dist/macos/
 ```
 
-安装：打开 `dist/macos/InspireX_0.3.0_aarch64.dmg`，把 InspireX 拖到「应用程序」。首次若被拦截，右键 → 打开。
+安装：打开 `dist/macos/InspireX_0.3.1_x64.dmg`（Apple Silicon 为 `aarch64`），把 InspireX 拖到「应用程序」。首次若被拦截，右键 → 打开。
 
 点 Dock / 任务栏里的灵犀图标也会显示窗口（即使当时是浏览器模式）。
 
@@ -47,6 +47,7 @@ npm run tauri -- dev  # 直接打开原生窗口
 - 外置卷 / 本地库 / **中转站**（绑定 iCloud 等云盘文件夹，存入后多端共享，不入灵犀库）
 - **订阅源**（RSS/Atom / 公开网页抽图 / URL 列表 / **Pinterest 看板自动盯梢**）定时或立即拉取入库
 - **AI 生图**（默认 MiniMax `image-01`；无 Key 时回退 Mock）
+- **文本 LLM**（默认 MiniMax `MiniMax-M3`，用于提示词挖掘；Key 不打进安装包）
 - **常用 prompt / 片库同步**（VPromptStore 图片提示词进 AI生图-prompt，可重复同步）
 - 分类 + 标签 + 出处/笔记
 - FTS / 标签 / 颜色 / CLIP 以文搜图（Mock 或本地 transformers）
@@ -64,19 +65,28 @@ CLIP_MODEL=openai/clip-vit-base-patch32
 
 需本机 `python3` + `torch` + `transformers`；sidecar：`scripts/clip_embed.py`。
 
-## AI 生图（MiniMax）
+## AI 服务（MiniMax）
 
-CLIP Mock 与生图独立。`.env`：
+CLIP Mock 与生图/文本独立。封装版默认：
+
+| 用途 | Provider | 模型 |
+|------|----------|------|
+| 文本 / 提示词挖掘 | MiniMax | `MiniMax-M3` |
+| 文生图 | MiniMax | `image-01` |
+
+**Key 不打入 DMG。** 安装后在 **设置** 填写，或把 Key 放进 `~/InspireX/ai-services.json` / `~/InspireX/.env` 的 `MINIMAX_API_KEY`。开发时用仓库 `.env`：
 
 ```bash
 AI_MOCK_MODE=true
+MINIMAX_BASE_URL=https://api.minimaxi.com
+MINIMAX_API_KEY=
+TEXT_GEN_PROVIDER=minimax
+TEXT_GEN_MODEL=MiniMax-M3
 IMAGE_GEN_PROVIDER=minimax
-IMAGE_GEN_BASE_URL=https://api.minimaxi.com
-IMAGE_GEN_API_KEY=          # 或复用 MINIMAX_API_KEY
 IMAGE_GEN_MODEL=image-01
 ```
 
-无 Key 时自动回退占位图。也可在侧栏 **设置** 里配置文本 / 图片 / 视频服务（写入 `~/InspireX/ai-services.json`，优先于 `.env`）。Key 不要提交。生图需 [按量计费接口密钥](https://platform.minimaxi.com/user-center/basic-information/interface-key)。
+无 Key 时自动回退 mock。生图需 [按量计费接口密钥](https://platform.minimaxi.com/user-center/basic-information/interface-key)。
 
 ## CLI
 

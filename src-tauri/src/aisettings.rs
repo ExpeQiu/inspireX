@@ -198,6 +198,17 @@ fn fill_kind_defaults(ep: &mut AiEndpoint, kind: &str) {
     if ep.base_url.trim().is_empty() {
         ep.base_url = MINIMAX_DEFAULT_BASE.into();
     }
+    if kind == "image" {
+        let m = ep.model.trim().to_ascii_lowercase().replace('_', "-");
+        if m == "m3" || m.starts_with("minimax-m") {
+            log::warn!(
+                target: "inspirex",
+                "ai_image_model_coerced from={} to=image-01",
+                ep.model
+            );
+            ep.model = "image-01".into();
+        }
+    }
     if ep.model.trim().is_empty() {
         ep.model = match kind {
             "image" => "image-01".into(),
@@ -249,13 +260,14 @@ fn from_env_services() -> AiServices {
         provider: env_first(&["TEXT_GEN_PROVIDER", "IMAGE_GEN_PROVIDER"]),
         base_url: env_first(&["TEXT_GEN_BASE_URL", "IMAGE_GEN_BASE_URL", "MINIMAX_BASE_URL"]),
         api_key: env_first(&["TEXT_GEN_API_KEY", "IMAGE_GEN_API_KEY"]),
-        model: env_first(&["TEXT_GEN_MODEL", "IMAGE_CAPTION_MODEL"]),
+        model: env_first(&["TEXT_GEN_MODEL", "MINIMAX_TEXT_MODEL", "IMAGE_CAPTION_MODEL"]),
     };
     if text.api_key.is_empty() {
         text.api_key = shared_key.clone();
     }
     if text.provider.is_empty() {
-        text.provider = "mock".into();
+        // 封装 App 无 .env 时仍带上 MiniMax 文本默认（无 Key 则 effective=mock）
+        text.provider = "minimax".into();
     }
     text.provider = normalize_provider(&text.provider);
     fill_kind_defaults(&mut text, "text");
@@ -267,7 +279,7 @@ fn from_env_services() -> AiServices {
         model: env_first(&["IMAGE_GEN_MODEL", "MINIMAX_IMAGE_MODEL"]),
     };
     if image.provider.is_empty() {
-        image.provider = "mock".into();
+        image.provider = "minimax".into();
     }
     image.provider = normalize_provider(&image.provider);
     fill_kind_defaults(&mut image, "image");
@@ -347,5 +359,31 @@ mod tests {
         assert!(v.image.api_key_set);
         assert_eq!(v.image.effective, "minimax");
         assert_eq!(effective_of("minimax", ""), "mock");
+    }
+
+    #[test]
+    fn packaged_defaults_minimax_models_without_key() {
+        for k in [
+            "TEXT_GEN_PROVIDER",
+            "TEXT_GEN_API_KEY",
+            "TEXT_GEN_MODEL",
+            "IMAGE_GEN_PROVIDER",
+            "IMAGE_GEN_API_KEY",
+            "IMAGE_GEN_MODEL",
+            "MINIMAX_API_KEY",
+            "MINIMAX_TEXT_MODEL",
+            "IMAGE_CAPTION_MODEL",
+        ] {
+            std::env::remove_var(k);
+        }
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("missing-ai-services.json");
+        let loaded = load(&path);
+        assert_eq!(loaded.text.provider, "minimax");
+        assert_eq!(loaded.text.model, "MiniMax-M3");
+        assert_eq!(loaded.image.provider, "minimax");
+        assert_eq!(loaded.image.model, "image-01");
+        assert_eq!(effective_of(&loaded.text.provider, &loaded.text.api_key), "mock");
+        assert_eq!(effective_of(&loaded.image.provider, &loaded.image.api_key), "mock");
     }
 }

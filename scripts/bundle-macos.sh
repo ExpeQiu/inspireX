@@ -8,7 +8,9 @@ cd "$ROOT"
 LOG_DIR="$ROOT/.run"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/bundle-macos.log"
-CARGO_TARGET="${CARGO_TARGET_DIR:-$HOME/.cache/inspirex-cargo-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/inspirex-cargo-target}"
+CARGO_TARGET="$CARGO_TARGET_DIR"
+mkdir -p "$CARGO_TARGET"
 BUNDLE_DIR="$CARGO_TARGET/release/bundle"
 DIST_DIR="$ROOT/dist/macos"
 
@@ -18,6 +20,7 @@ DIST_DIR="$ROOT/dist/macos"
   echo "cargo_target=$CARGO_TARGET"
   uname -m
   rustc -V
+  echo "version=0.3.1 llm_text=MiniMax-M3 llm_image=image-01 key_in_bundle=false"
 } | tee "$LOG"
 
 if [[ ! -d node_modules ]]; then
@@ -55,4 +58,5 @@ echo "====== bundle ok ======"
 echo "DMG: $OUT"
 echo "安装: 打开 DMG，把 InspireX 拖到 Applications"
 echo "首次若被拦截: 右键 → 打开"
+echo "LLM: 文本 MiniMax-M3 / 生图 image-01；Key 不在包内，安装后读 ~/InspireX/ai-services.json 或设置页"
 echo "日志: $LOG"

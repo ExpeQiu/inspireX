@@ -26,8 +26,8 @@ type Draft = {
 };
 
 const KINDS: { id: Kind; title: string; hint: string }[] = [
-  { id: "text", title: "文本", hint: "提示词挖掘、视觉理解。无 Key 时走 mock。" },
-  { id: "image", title: "图片", hint: "文生图。无 Key 时生成占位图。" },
+  { id: "text", title: "文本", hint: "提示词挖掘、视觉理解。MiniMax 用 MiniMax-M3。无 Key 时走 mock。" },
+  { id: "image", title: "图片", hint: "文生图。MiniMax 用 image-01（M3 是语言模型，不能出图）。无 Key 时生成占位图。" },
   { id: "video", title: "视频", hint: "配置先保存；视频生成接入后使用此处服务。" },
 ];
 

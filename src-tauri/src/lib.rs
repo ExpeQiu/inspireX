@@ -49,10 +49,13 @@ fn reveal_main_window(app: &tauri::AppHandle) {
 }
 
 fn load_dotenv() {
-    let candidates = [
+    let mut candidates = vec![
         std::path::PathBuf::from(".env"),
         std::path::PathBuf::from("../.env"),
     ];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("InspireX").join(".env"));
+    }
     for p in candidates {
         if p.exists() {
             if let Ok(content) = std::fs::read_to_string(&p) {
@@ -86,18 +89,25 @@ pub fn run() {
         log::error!(target: "inspirex", "ensure_dirs failed: {e}");
     }
     match state.open_db() {
-        Ok(_) => log::info!(
-            target: "inspirex",
-            "library ready path={} mock={} model={} image_gen={} volume_indexes={} local_indexes={} browse_hub={} ingest=:{}",
-            state.library_path.display(),
-            state.ai_mock_mode,
-            state.clip.model_name(),
-            crate::imagegen::effective_provider(&state),
-            browse::list_index_roots("volumes").len(),
-            browse::list_local_index_roots().len(),
-            browse::default_hub_root().display(),
-            state.ingest_port
-        ),
+        Ok(_) => {
+            let text = state.ai_text();
+            let image = state.ai_image();
+            log::info!(
+                target: "inspirex",
+                "library ready path={} mock={} clip={} text={} text_model={} image_gen={} image_model={} key_in_bundle=false volume_indexes={} local_indexes={} browse_hub={} ingest=:{}",
+                state.library_path.display(),
+                state.ai_mock_mode,
+                state.clip.model_name(),
+                crate::aisettings::effective_of(&text.provider, &text.api_key),
+                text.model,
+                crate::imagegen::effective_provider(&state),
+                image.model,
+                browse::list_index_roots("volumes").len(),
+                browse::list_local_index_roots().len(),
+                browse::default_hub_root().display(),
+                state.ingest_port
+            );
+        }
         Err(e) => log::error!(target: "inspirex", "open_db failed: {e}"),
     }
 

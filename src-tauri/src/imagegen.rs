@@ -175,8 +175,22 @@ pub fn import_job(
     Ok(job)
 }
 
+fn is_minimax_text_model(model: &str) -> bool {
+    let t = model.trim().to_ascii_lowercase().replace('_', "-");
+    t == "m3" || t.starts_with("minimax-m")
+}
+
 fn default_model(configured: &str, provider: &str) -> String {
     let configured = configured.trim();
+    if provider == "minimax" && is_minimax_text_model(configured) {
+        log::warn!(
+            target: "inspirex",
+            "image_gen_model_coerced from={} to={} (M 系列是语言模型，生图用 image-01)",
+            configured,
+            MINIMAX_DEFAULT_MODEL
+        );
+        return MINIMAX_DEFAULT_MODEL.into();
+    }
     if !configured.is_empty() {
         return configured.to_string();
     }
@@ -544,6 +558,8 @@ mod tests {
         std::env::set_var("INSPIREX_LIBRARY_PATH", &lib);
         std::env::set_var("AI_MOCK_MODE", "true");
         std::env::set_var("IMAGE_GEN_PROVIDER", "mock");
+        let cfg = dir.path().join("ai-services.json");
+        std::env::set_var("INSPIREX_AI_CONFIG", &cfg);
         let state = AppState::from_env();
         state.ensure_dirs().unwrap();
 
@@ -615,6 +631,7 @@ mod tests {
         let with_key = AppState::from_env();
         assert_eq!(effective_provider(&with_key), "minimax");
         assert_eq!(default_model(&with_key.ai_image().model, "minimax"), "image-01");
+        assert_eq!(default_model("MiniMax-M3", "minimax"), "image-01");
 
         std::env::remove_var("IMAGE_GEN_API_KEY");
         let no_key = AppState::from_env();

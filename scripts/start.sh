@@ -24,6 +24,9 @@ set +a
 export AI_MOCK_MODE="${AI_MOCK_MODE:-true}"
 export RUST_LOG="${RUST_LOG:-info}"
 export INSPIREX_SHOW_WINDOW="${INSPIREX_SHOW_WINDOW:-false}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/inspirex-cargo-target}"
+mkdir -p "$CARGO_TARGET_DIR"
+echo "[inspirex] cargo target-dir=${CARGO_TARGET_DIR}"
 UI_PORT="${VITE_DEV_PORT:-1420}"
 INGEST_PORT="${INSPIREX_INGEST_PORT:-18765}"
 UI_URL="http://127.0.0.1:${UI_PORT}"
@@ -33,9 +36,10 @@ if [[ ! -d node_modules ]]; then
   npm install
 fi
 
-echo "[inspirex] starting backend (clip_mock=${AI_MOCK_MODE} image_gen=${IMAGE_GEN_PROVIDER:-mock} show_window=${INSPIREX_SHOW_WINDOW})"
-npm run tauri -- dev >.run/inspirex.log 2>&1 &
+echo "[inspirex] starting backend (clip_mock=${AI_MOCK_MODE} text_gen=${TEXT_GEN_PROVIDER:-mock} text_model=${TEXT_GEN_MODEL:-} image_gen=${IMAGE_GEN_PROVIDER:-mock} image_model=${IMAGE_GEN_MODEL:-} show_window=${INSPIREX_SHOW_WINDOW})"
+nohup npm run tauri -- dev >.run/inspirex.log 2>&1 &
 echo $! >.run/inspirex.pid
+disown $! 2>/dev/null || true
 echo "已启动 pid=$(cat .run/inspirex.pid) 日志 .run/inspirex.log"
 
 ok=0

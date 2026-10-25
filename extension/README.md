@@ -5,7 +5,7 @@
 1. 启动桌面端：`./scripts/start.sh`（会监听 `127.0.0.1:18765`）
 2. Chrome → 扩展程序 → 开发者模式 → 加载已解压的扩展程序 → 选本目录 `extension/`
 3. 选项里确认 Token 与 `.env` 的 `INSPIREX_INGEST_TOKEN` 一致（默认 `inspirex-local`）
-4. 若已装过旧版，点「重新加载」（当前 0.3.0，含 Pinterest 自动盯梢）
+4. 若已装过旧版，点「重新加载」（当前 0.3.1，含 Pinterest 自动盯梢）
 
 ## 使用
 
